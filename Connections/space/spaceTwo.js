@@ -46,7 +46,13 @@ class SpaceTwo extends Space {
       };
 
       this.socket.onmessage = (event) => {
+        if (process.env.DEBUG_PACKETS === "true") {
+          console.log(`[DEBUG SpaceTwo RAW] ${Buffer.from(event.data).toString("hex")}`);
+        }
         const unencryptedData = Buffer.from(this.cypher.decrypt(event.data));
+        if (process.env.DEBUG_PACKETS === "true") {
+          console.log(`[DEBUG SpaceTwo DEC] ${unencryptedData.toString("hex")}`);
+        }
         if (event.data.byteLength == 3) return; // Ignore ping packets
         this.packetsCounter++;
         const orginialunencryptedBuffer = unencryptedData.toString("hex");

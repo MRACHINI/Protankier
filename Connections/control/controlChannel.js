@@ -86,6 +86,12 @@ class ControlChannel {
 
       this.socket.binaryType = "arraybuffer";
 
+      this.socket.onmessage = (event) => {
+        if (process.env.DEBUG_PACKETS === "true") {
+          console.log(`[DEBUG Control RAW] ${Buffer.from(event.data).toString("hex")}`);
+        }
+      };
+
       this.socket.onopen = (e) => {
         this.logger.info(`[connectionOpened Connection established - ${this.connectionString}]`);
         resolve(this.socket); // Resolve the promise once connected

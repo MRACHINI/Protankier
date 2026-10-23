@@ -279,11 +279,27 @@ async function clickAccount(Nickname, Password, rank, Map, Side, io, tankiConfig
     });
 
     await spaceTwo.connectToServer();
+    logger.info("Space Two connected, waiting for SV_ReadyToLogin");
 
     // Registers login handler
-    await spaceTwo.waitForPacket("SV_ReadyToLogin");
+    const readyToLogin = await Promise.race([
+      spaceTwo.waitForPacket("SV_ReadyToLogin").then(() => true),
+      new Promise((resolve) => setTimeout(() => resolve(false), 8000)),
+    ]);
+
+    if (!readyToLogin) {
+      logger.error("Timeout waiting for SV_ReadyToLogin (Space Two)");
+      logger.loggerIoEmit("new-message", { color: "red", message: `${Nickname} - Space Two login timeout` }, io);
+      controlChannel.close();
+      spaceTwo.close();
+      resolve(`[${Nickname} - Space Two login timeout]`);
+      return;
+    }
+
+    logger.info("SV_ReadyToLogin received, sending login");
     await spaceTwo.sendPacket("CL_Collection_Messages");
     await spaceTwo.sendPacket("CL_loginByPassword", { nickname: Nickname, password: Password });
+    logger.info("Login packet sent");
 
     const blockOrWrongPassHandler = async () => {
       logger.loggerIoEmit("close-click-session", Nickname, io);
