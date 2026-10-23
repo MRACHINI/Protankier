@@ -14,7 +14,7 @@ services:
     labels:
       - traefik.enable=true
       - traefik.docker.network=proxy
-      - traefik.http.routers.protankier.rule=Host(`protankier.rachini.com`)
+      - traefik.http.routers.protankier.rule=Host(`protankier.q.rachini.com`)
       - traefik.http.routers.protankier.entrypoints=websecure
       - traefik.http.routers.protankier.tls=true
       - traefik.http.services.protankier.loadbalancer.server.port=3006
