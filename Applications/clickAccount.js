@@ -11,11 +11,16 @@ import dotenv from "dotenv";
 import leaveAccount from "./leaveAccount.js";
 import { performance } from "perf_hooks";
 import Battle from "../Components/Battle.js";
-import { MAX_CLICKER_INTERVAL_TIMEOUT } from "../config.js";
+import { MAX_CLICKER_INTERVAL_TIMEOUT, SPAM_MODE, CONTINUOUS_SPAM_ENABLED, CONTINUOUS_SPAM_INTERVAL } from "../config.js";
+
 dotenv.config({ path: "../.env" });
+
 let lastPacketTime = 0;
 let averagePer10Seconds = 0;
 let averagePer10SecondsCounter = 0;
+
+// Global pool for continuous spam mode
+export const activeClickers = new Map();
 
 async function clickAccount(Nickname, Password, rank, Map, Side, io, tankiConfig, proxyUrl) {
   return new Promise(async (resolve) => {
@@ -36,8 +41,10 @@ async function clickAccount(Nickname, Password, rank, Map, Side, io, tankiConfig
     let wrongPassOrBlock = false;
     let battleMapResetListener = () => {};
     let isPause = false;
+    
     const logger = new Logger(Nickname);
     const accountState = { ID: "", Server: "", online: "", Rank: "", Map: "", Nickname: "", ReconnectServer: "", minRank: 0, maxRank: 0 };
+    
     if (Map.includes("=")) Map = Map.split("=")[1];
     const start_time = performance.now();
     const BattleObject = new Battle(Map);
@@ -115,6 +122,11 @@ async function clickAccount(Nickname, Password, rank, Map, Side, io, tankiConfig
         logger.info(
           `${Nickname} - [Control Channel - Closed Connection] hasGlitched=${hasGlitched}, isClicking=${isClicking}, isDeadMap=${isDeadMap}, hasBeenClosedByUser=${hasBeenClosedByUser}, isAccountInMap=${isAccountInMap}, hashResponseHasNotArrived=${hashResponseHasNotArrived}, startedClickInterval=${startedClickInterval}`
         );
+
+        // Remove from active pool
+        if (CONTINUOUS_SPAM_ENABLED) {
+          activeClickers.delete(Nickname);
+        }
 
         // If it has been closed by user
         if (hasBeenClosedByUser) {
@@ -420,7 +432,7 @@ async function clickAccount(Nickname, Password, rank, Map, Side, io, tankiConfig
           spaceSix.waitForClose().then(closeAll);
 
           // Space Six Dependencies
-          // await spaceSix.waitForPacket("SV_loadDependencies");
+          // await spaceSix.waitForPacket("SV_loadDependencies")
           await spaceSix.waitForNPackets();
           await spaceSix.sendPacket("CL_dependeciesLoaded");
         })
@@ -564,7 +576,47 @@ async function clickAccount(Nickname, Password, rank, Map, Side, io, tankiConfig
 
         BattleObject.onFreeSpot(freeSpotListener);
         battleMapResetListener = () => BattleObject.removeFreeSpotListener(freeSpotListener);
-        clickingInterval = createClickingInterval({ startImmediate: true });
+        
+        // ============================================================
+        // CONTINUOUS SPAM MODE
+        // ============================================================
+        if (CONTINUOUS_SPAM_ENABLED) {
+          logger.info(`[${Nickname} - Continuous spam mode active]`);
+          logger.loggerIoEmit("new-message", { color: "blue", message: `${Nickname} - Continuous spam: ${SPAM_MODE}` }, io);
+          
+          // Add to active pool
+          activeClickers.set(Nickname, {
+            spaceSeven: spaceSeven,
+            map: Map,
+            side: Side,
+            interval: null
+          });
+          
+          // Start continuous spam interval
+          const spamInterval = setInterval(async () => {
+            if (!isClicking || isPause) return;
+            
+            await spaceSeven.sendPacket("CL_joinBattle", { mapLink: Map, side: Side });
+            
+            const currentTime = new Date().getTime();
+            const timeSinceLastPacket = currentTime - lastPacketTime;
+            lastPacketTime = currentTime;
+            
+            averagePer10SecondsCounter++;
+            if (!isNaN(timeSinceLastPacket)) {
+              averagePer10Seconds += timeSinceLastPacket;
+            }
+          }, CONTINUOUS_SPAM_INTERVAL);
+          
+          clickingInterval = spamInterval;
+        } else {
+          // ============================================================
+          // REACTIVE MODE (original behavior)
+          // ============================================================
+          logger.info(`[${Nickname} - Reactive mode (wait for player leave)]`);
+          clickingInterval = createClickingInterval({ startImmediate: true });
+        }
+        
         handleCaptchaSolving();
 
         logger.info(`Time taken to start clicking: ${(performance.now() - start_time) / 1000} seconds`);

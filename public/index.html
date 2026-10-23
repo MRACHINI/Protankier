@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tanki Clicker Control Panel</title>
+    <script src="/socket.io/socket.io.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: #eee;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container { max-width: 1200px; margin: 0 auto; }
+        h1 {
+            text-align: center;
+            margin-bottom: 30px;
+            color: #00d4ff;
+            font-size: 2.5em;
+            text-shadow: 0 0 10px rgba(0, 212, 255, 0.5);
+        }
+        .panel {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 15px;
+            padding: 25px;
+            margin-bottom: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        .panel h2 { color: #00d4ff; margin-bottom: 20px; font-size: 1.3em; }
+        .form-group { margin-bottom: 15px; }
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #aaa;
+            font-size: 0.9em;
+        }
+        input, select {
+            width: 100%;
+            padding: 12px 15px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 8px;
+            background: rgba(0, 0, 0, 0.3);
+            color: #fff;
+            font-size: 1em;
+        }
+        input:focus, select:focus {
+            outline: none;
+            border-color: #00d4ff;
+            box-shadow: 0 0 10px rgba(0, 212, 255, 0.3);
+        }
+        button {
+            background: linear-gradient(135deg, #00d4ff 0%, #0099cc 100%);
+            color: #fff;
+            border: none;
+            padding: 12px 30px;
+            border-radius: 8px;
+            font-size: 1em;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-weight: bold;
+            margin-right: 10px;
+            margin-bottom: 10px;
+        }
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(0, 212, 255, 0.4);
+        }
+        button:active { transform: translateY(0); }
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 10px;
+        }
+        .status-connected { background: #00ff88; }
+        .status-disconnected { background: #ff4444; }
+        #connectionStatus {
+            text-align: center;
+            padding: 10px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            background: rgba(0, 255, 136, 0.1);
+            border: 1px solid rgba(0, 255, 136, 0.3);
+        }
+        #connectionStatus.disconnected {
+            background: rgba(255, 68, 68, 0.1);
+            border-color: rgba(255, 68, 68, 0.3);
+        }
+        #messageLog {
+            max-height: 300px;
+            overflow-y: auto;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 8px;
+            padding: 15px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+        }
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 8px;
+            border-radius: 5px;
+        }
+        .log-entry.info { background: rgba(0, 212, 255, 0.1); }
+        .log-entry.success { background: rgba(0, 255, 136, 0.1); }
+        .log-entry.error { background: rgba(255, 68, 68, 0.1); }
+        .log-entry.warning { background: rgba(255, 165, 0, 0.1); }
+        .account-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+        .account-card {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 10px;
+            padding: 15px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        .account-card h3 { color: #00d4ff; margin-bottom: 10px; font-size: 1.1em; }
+        .account-card .status { font-size: 0.85em; color: #888; }
+        .account-card .status.online { color: #00ff88; }
+        .account-card .status.offline { color: #ff4444; }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }
+        .stat-card {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 10px;
+            padding: 20px;
+            text-align: center;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        .stat-card .value { font-size: 2em; font-weight: bold; color: #00d4ff; }
+        .stat-card .label { color: #888; margin-top: 5px; font-size: 0.9em; }
+        .btn-danger {
+            background: linear-gradient(135deg, #ff4444 0%, #cc0000 100%);
+        }
+        .btn-warning {
+            background: linear-gradient(135deg, #ff9900 0%, #cc7a00 100%);
+        }
+        .mode-toggle { display: flex; gap: 10px; margin-bottom: 15px; }
+        .mode-toggle button { flex: 1; margin: 0; }
+        .mode-toggle button.active {
+            background: linear-gradient(135deg, #00ff88 0%, #00cc6a 100%);
+        }
+        .timestamp { color: #666; font-size: 0.8em; margin-right: 10px; }
+        .mode-badge {
+            display: inline-block;
+            padding: 5px 10px;
+            border-radius: 5px;
+            font-size: 0.8em;
+            margin-bottom: 10px;
+        }
+        .mode-badge.reactive { background: rgba(255, 165, 0, 0.3); color: #ff9900; }
+        .mode-badge.continuous { background: rgba(0, 255, 136, 0.3); color: #00ff88; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎮 Tanki Clicker Control Panel</h1>
+        
+        <div id="connectionStatus">
+            <span class="status-indicator status-connected"></span>
+            <span id="statusText">Connecting...</span>
+        </div>
+        
+        <div class="panel">
+            <h2>🚀 Start Clicking</h2>
+            <div class="mode-toggle">
+                <button id="btnReactive" onclick="setMode('reactive')">🔄 Reactive Mode</button>
+                <button id="btnContinuous" class="active" onclick="setMode('continuous')">⚡ Continuous Spam</button>
+            </div>
+            <div id="modeInfo" style="text-align: center; margin-bottom: 15px; color: #888; font-size: 0.9em;">
+                <span class="mode-badge continuous">Continuous</span> - Sends packets every 500ms regardless of spot status
+            </div>
+            
+            <div class="form-group">
+                <label>Account Nickname</label>
+                <input type="text" id="account" placeholder="Enter nickname">
+            </div>
+            
+            <div class="form-group">
+                <label>Password</label>
+                <input type="password" id="password" placeholder="Enter password">
+            </div>
+            
+            <div class="form-group">
+                <label>Rank</label>
+                <input type="text" id="rank" placeholder="e.g., Novice">
+            </div>
+            
+            <div class="form-group">
+                <label>Battle Link (Map ID)</label>
+                <input type="text" id="battleLink" placeholder="e.g., 1234567890">
+            </div>
+            
+            <div class="form-group">
+                <label>Team Side</label>
+                <select id="side">
+                    <option value="J">Any Side (J)</option>
+                    <option value="A">Alpha (A)</option>
+                    <option value="B">Bravo (B)</option>
+                </select>
+            </div>
+            
+            <div class="form-group">
+                <label>Proxy URL (optional)</label>
+                <input type="text" id="proxyUrl" placeholder="http://proxy:port">
+            </div>
+            
+            <button onclick="startClicking()">🚀 Start Clicking</button>
+            <button class="btn-warning" onclick="pauseAll()">⏸️ Pause All</button>
+            <button class="btn-danger" onclick="stopAll()">🛑 Stop All</button>
+        </div>
+        
+        <div class="panel">
+            <h2>📊 Statistics</h2>
+            <div class="stats">
+                <div class="stat-card">
+                    <div class="value" id="totalAccounts">0</div>
+                    <div class="label">Total Accounts</div>
+                </div>
+                <div class="stat-card">
+                    <div class="value" id="onlineAccounts">0</div>
+                    <div class="label">Online</div>
+                </div>
+                <div class="stat-card">
+                    <div class="value" id="clickingAccounts">0</div>
+                    <div class="label">Clicking</div>
+                </div>
+                <div class="stat-card">
+                    <div class="value" id="pausedAccounts">0</div>
+                    <div class="label">Paused</div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="panel">
+            <h2>📝 Message Log</h2>
+            <div id="messageLog"></div>
+        </div>
+        
+        <div class="panel">
+            <h2>👥 Active Accounts</h2>
+            <div class="account-list" id="accountList"></div>
+        </div>
+    </div>
+    
+    <script>
+        const socket = io();
+        const accounts = new Map();
+        let currentMode = 'continuous';
+        
+        socket.on('connect', () => {
+            updateConnectionStatus(true);
+            addLog('Connected to server!', 'success');
+        });
+        
+        socket.on('disconnect', () => {
+            updateConnectionStatus(false);
+            addLog('Disconnected from server', 'error');
+        });
+        
+        socket.on('update-status', (data) => {
+            const { account, status } = data;
+            if (!accounts.has(account)) {
+                accounts.set(account, { status, nickname: account, rank: '' });
+            } else {
+                accounts.get(account).status = status;
+            }
+            updateAccountList();
+            updateStats();
+            addLog(`${account}: ${status}`, 'info');
+        });
+        
+        socket.on('update-rank', (data) => {
+            const { account, rank } = data;
+            if (accounts.has(account)) {
+                accounts.get(account).rank = rank;
+                updateAccountList();
+            }
+            addLog(`${account}: Rank changed to ${rank}`, 'info');
+        });
+        
+        socket.on('update-nickname', (data) => {
+            const { account, nickname } = data;
+            if (accounts.has(account)) {
+                const acc = accounts.get(account);
+                acc.nickname = nickname;
+                accounts.set(nickname, acc);
+                accounts.delete(account);
+                updateAccountList();
+            }
+            addLog(`${account}: Nickname changed to ${nickname}`, 'info');
+        });
+        
+        socket.on('update-map', (data) => {
+            const { account, map } = data;
+            addLog(`${account}: Map changed to ${map}`, 'info');
+        });
+        
+        socket.on('new-message', (data) => {
+            const { color, message } = data;
+            let type = 'info';
+            if (color === 'green') type = 'success';
+            if (color === 'red') type = 'error';
+            if (color === 'orange') type = 'warning';
+            addLog(message, type);
+        });
+        
+        socket.on('close-click-session', (data) => {
+            addLog(data, 'info');
+        });
+        
+        function updateConnectionStatus(connected) {
+            const statusDiv = document.getElementById('connectionStatus');
+            const statusText = document.getElementById('statusText');
+            if (connected) {
+                statusDiv.classList.remove('disconnected');
+                statusText.textContent = 'Connected';
+            } else {
+                statusDiv.classList.add('disconnected');
+                statusText.textContent = 'Disconnected';
+            }
+        }
+        
+        function addLog(message, type = 'info') {
+            const logDiv = document.getElementById('messageLog');
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
+            const timestamp = new Date().toLocaleTimeString();
+            entry.textContent = `[${timestamp}] ${message}`;
+            logDiv.insertBefore(entry, logDiv.firstChild);
+            while (logDiv.children.length > 100) {
+                logDiv.removeChild(logDiv.lastChild);
+            }
+        }
+        
+        function updateAccountList() {
+            const list = document.getElementById('accountList');
+            list.innerHTML = '';
+            accounts.forEach((acc, nickname) => {
+                const card = document.createElement('div');
+                card.className = 'account-card';
+                card.innerHTML = `<h3>${acc.nickname}</h3><div class="status ${acc.status === 'Glitched' ? 'online' : 'offline'}">${acc.status}</div>`;
+                list.appendChild(card);
+            });
+        }
+        
+        function updateStats() {
+            let total = accounts.size;
+            let online = 0, clicking = 0, paused = 0;
+            accounts.forEach(acc => {
+                if (acc.status === 'Glitched' || acc.status === 'Clicking') clicking++;
+                if (acc.status === 'Paused') paused++;
+                if (acc.status === 'Glitched') online++;
+            });
+            document.getElementById('totalAccounts').textContent = total;
+            document.getElementById('onlineAccounts').textContent = online;
+            document.getElementById('clickingAccounts').textContent = clicking;
+            document.getElementById('pausedAccounts').textContent = paused;
+        }
+        
+        function setMode(mode) {
+            currentMode = mode;
+            document.getElementById('btnReactive').classList.toggle('active', mode === 'reactive');
+            document.getElementById('btnContinuous').classList.toggle('active', mode === 'continuous');
+            const modeInfo = document.getElementById('modeInfo');
+            if (mode === 'continuous') {
+                modeInfo.innerHTML = '<span class="mode-badge continuous">Continuous</span> - Sends packets every 500ms regardless of spot status';
+            } else {
+                modeInfo.innerHTML = '<span class="mode-badge reactive">Reactive</span> - Waits for "player left" packet, then responds';
+            }
+            addLog(`Mode changed to: ${mode}`, 'info');
+        }
+        
+        function startClicking() {
+            const account = document.getElementById('account').value.trim();
+            const password = document.getElementById('password').value.trim();
+            const rank = document.getElementById('rank').value.trim();
+            const battleLink = document.getElementById('battleLink').value.trim();
+            const side = document.getElementById('side').value;
+            const proxyUrl = document.getElementById('proxyUrl').value.trim();
+            
+            if (!account || !password || !rank || !battleLink) {
+                addLog('Please fill in all required fields', 'error');
+                return;
+            }
+            
+            const tankiConfig = JSON.stringify({
+                resourceUrl: 'https://cdn.eu.tankionline.com',
+                language: 'en',
+                userAgent: 'Mozilla/5.0',
+                os: 'Windows',
+                deviceType: 'desktop',
+                timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                gpu: 'NVIDIA',
+                ram: 16
+            });
+            
+            socket.emit('click', {
+                account,
+                password,
+                rank,
+                battleLink,
+                side,
+                tankiConfig,
+                proxyUrl
+            });
+            addLog(`Starting ${account} in ${currentMode} mode`, 'success');
+        }
+        
+        function pauseAll() {
+            socket.emit('pause-all');
+            addLog('Pausing all accounts', 'info');
+        }
+        
+        function stopAll() {
+            socket.emit('stop-all');
+            addLog('Stopping all accounts', 'info');
+        }
+        
+        function setMode(mode) {
+            currentMode = mode;
+            const btnReactive = document.getElementById('btnReactive');
+            const btnContinuous = document.getElementById('btnContinuous');
+            btnReactive.classList.toggle('active', mode === 'reactive');
+            btnContinuous.classList.toggle('active', mode === 'continuous');
+            const modeInfo = document.getElementById('modeInfo');
+            if (mode === 'continuous') {
+                modeInfo.innerHTML = '<span class="mode-badge continuous">Continuous</span> - Sends packets every 500ms regardless of spot status';
+            } else {
+                modeInfo.innerHTML = '<span class="mode-badge reactive">Reactive</span> - Waits for "player left" packet, then responds';
+            }
+            addLog(`Mode changed to: ${mode}`, 'info');
+        }
+    </script>
+</body>
+</html>

@@ -1,20 +1,45 @@
 import { Server } from "socket.io";
+import { createServer } from "http";
+import { readFileSync } from "fs";
+import { fileURLToPath } from "url";
+import { dirname, join } from "path";
 import clickAccount from "./Applications/clickAccount.js";
 import leaveAccount from "./Applications/leaveAccount.js";
+import { SPAM_MODE } from "./config.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 let client;
 const maxConcurrency = 50;
 let activeRequests = 0;
 const queue = [];
 
-const io = new Server(3006, {
+// Read the HTML file
+const htmlPath = join(__dirname, "public", "index.html");
+const htmlContent = readFileSync(htmlPath, "utf-8");
+
+// Create HTTP server
+const httpServer = createServer((req, res) => {
+  if (req.url === "/" || req.url === "/index.html") {
+    res.writeHead(200, { "Content-Type": "text/html" });
+    res.end(htmlContent);
+  } else {
+    res.writeHead(404);
+    res.end("Not found");
+  }
+});
+
+const io = new Server(httpServer, {
   cors: {
     origin: "*",
     methods: ["GET", "POST"],
   },
 });
 
-console.log("Server started on port 3006");
+console.log("🎮 Tanki Clicker Server");
+console.log(`📊 Mode: ${SPAM_MODE}`);
+console.log(`🌐 UI: http://localhost:3006`);
 
 io.on("connection", async (socket) => {
   client = socket;
