@@ -1,0 +1,27 @@
+services:
+  tanki-clicker:
+    image: ghcr.io/mrachini/protankier:latest
+    container_name: tanki-clicker
+    ports:
+      - "3006:3006"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3006/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=proxy
+      - traefik.http.routers.protankier.rule=Host(`protankier.rachini.com`)
+      - traefik.http.routers.protankier.entrypoints=websecure
+      - traefik.http.routers.protankier.tls=true
+      - traefik.http.services.protankier.loadbalancer.server.port=3006
+    networks:
+      - proxy
+
+networks:
+  proxy:
+    external: true
+    name: proxy

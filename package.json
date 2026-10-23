@@ -1,10 +1,10 @@
 {
   "name": "test",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "main": "main.js",
   "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node --check main.js && node --check config.js && node --check Applications/clickAccount.js",
     "commands": "node Utils/exportCommands.js"
   },
   "author": "",

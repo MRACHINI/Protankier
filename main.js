@@ -24,10 +24,18 @@ const httpServer = createServer((req, res) => {
   if (req.url === "/" || req.url === "/index.html") {
     res.writeHead(200, { "Content-Type": "text/html" });
     res.end(htmlContent);
+  } else if (req.url === "/health") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ status: "ok", mode: SPAM_MODE }));
   } else {
     res.writeHead(404);
     res.end("Not found");
   }
+});
+
+const PORT = process.env.PORT || 3006;
+httpServer.listen(PORT, "0.0.0.0", () => {
+  console.log(`🚀 Listening on 0.0.0.0:${PORT}`);
 });
 
 const io = new Server(httpServer, {
