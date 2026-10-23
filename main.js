@@ -8,6 +8,14 @@ import leaveAccount from "./Applications/leaveAccount.js";
 import { refreshServerList } from "./Connections/control/controlChannel.js";
 import { SPAM_MODE } from "./config.js";
 
+// Keep the server alive if a single account handler throws
+process.on("uncaughtException", (error) => {
+  console.error("Uncaught exception:", error);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled rejection:", reason);
+});
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
@@ -58,6 +66,11 @@ io.on("connection", async (socket) => {
   console.log("New server connection");
 
   socket.onAny((event, ...args) => {
+    if (event === "click" && args[0]) {
+      const { password, ...safeData } = args[0];
+      console.log(event, [{ ...safeData, password: "***" }]);
+      return;
+    }
     console.log(event, args);
   });
 

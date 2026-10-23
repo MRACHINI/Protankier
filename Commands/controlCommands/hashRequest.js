@@ -17,12 +17,33 @@ const defaultParameters = {
 
 class CL_HashRequest {
   constructor(config) {
-    if (!config || Object.keys(config).length === 0) {
-      config = defaultParameters;
-    }
+    const provided = config && Object.keys(config).length > 0 ? config : {};
+    const pick = (...values) => {
+      for (const value of values) {
+        if (value !== undefined && value !== null && value !== "") return String(value);
+      }
+      return undefined;
+    };
+
+    const normalized = {
+      resources: pick(provided.resources, provided.resourceUrl, defaultParameters.resources),
+      config_template: pick(provided.config_template, provided.configTemplate, defaultParameters.config_template),
+      balancer: pick(provided.balancer, defaultParameters.balancer),
+      lang: pick(provided.lang, provided.language, defaultParameters.lang),
+      browser_user_agent: pick(provided.browser_user_agent, provided.userAgent, defaultParameters.browser_user_agent),
+      os: pick(provided.os, defaultParameters.os),
+      device_type: pick(provided.device_type, provided.deviceType, defaultParameters.device_type),
+      client_type: pick(provided.client_type, provided.clientType, defaultParameters.client_type),
+      hardware_concurrency: pick(provided.hardware_concurrency, provided.hardwareConcurrency, defaultParameters.hardware_concurrency),
+      time_zone: pick(provided.time_zone, provided.timezone, defaultParameters.time_zone),
+      video_card: pick(provided.video_card, provided.gpu, defaultParameters.video_card),
+      mobile_device: pick(provided.mobile_device, defaultParameters.mobile_device),
+      touchscreen_support: pick(provided.touchscreen_support, defaultParameters.touchscreen_support),
+      ram_size: pick(provided.ram_size, provided.ram, defaultParameters.ram_size),
+    };
 
     const { resources, config_template, balancer, lang, browser_user_agent, os, device_type, client_type, hardware_concurrency, time_zone, video_card, mobile_device, touchscreen_support, ram_size } =
-      config;
+      normalized;
     this.command_id = 1;
 
     this.parameters = {

@@ -395,14 +395,20 @@
             }
             
             const tankiConfig = JSON.stringify({
-                resourceUrl: 'https://cdn.eu.tankionline.com',
-                language: 'en',
-                userAgent: 'Mozilla/5.0',
+                resources: 'https://s.eu.tankionline.com',
+                config_template: 'https://c{server}.eu.tankionline.com/config.xml',
+                balancer: 'https://tankionline.com/s/status.js/',
+                lang: 'en',
+                browser_user_agent: navigator.userAgent,
                 os: 'Windows',
-                deviceType: 'desktop',
-                timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-                gpu: 'NVIDIA',
-                ram: 16
+                device_type: 'Desktop',
+                client_type: 'BROWSER',
+                hardware_concurrency: String(navigator.hardwareConcurrency || 8),
+                time_zone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                video_card: 'NVIDIA',
+                mobile_device: 'false',
+                touchscreen_support: 'false',
+                ram_size: '8192'
             });
             
             socket.emit('click', {
