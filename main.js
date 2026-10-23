@@ -5,6 +5,7 @@ import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import clickAccount from "./Applications/clickAccount.js";
 import leaveAccount from "./Applications/leaveAccount.js";
+import { refreshServerList } from "./Connections/control/controlChannel.js";
 import { SPAM_MODE } from "./config.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -18,6 +19,9 @@ const queue = [];
 // Read the HTML file
 const htmlPath = join(__dirname, "public", "index.html");
 const htmlContent = readFileSync(htmlPath, "utf-8");
+
+// Load current game server list (falls back to hardcoded ports if unavailable)
+await refreshServerList();
 
 // Create HTTP server
 const httpServer = createServer((req, res) => {

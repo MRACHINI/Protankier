@@ -418,12 +418,20 @@
         }
         
         function pauseAll() {
-            socket.emit('pause-all');
+            if (accounts.size === 0) {
+                addLog('No active accounts to pause', 'warning');
+                return;
+            }
+            accounts.forEach((acc, name) => socket.emit(`pause-account-${name}`));
             addLog('Pausing all accounts', 'info');
         }
         
         function stopAll() {
-            socket.emit('stop-all');
+            if (accounts.size === 0) {
+                addLog('No active accounts to stop', 'warning');
+                return;
+            }
+            accounts.forEach((acc, name) => socket.emit(`stop-click-${name}`));
             addLog('Stopping all accounts', 'info');
         }
         

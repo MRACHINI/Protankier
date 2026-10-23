@@ -3,26 +3,53 @@ import WebSocket from "ws";
 import { hstab, bufToHex } from "../space-utils/PacketHelper.js";
 import Logger from "../../Logger/Logger.js";
 import { HttpsProxyAgent } from "https-proxy-agent";
-const serverScores = {
-  "c1.eu.tankionline.com": { score: 100, totalConnections: 0, reconnectMaps: [] },
-  "c2.eu.tankionline.com": { score: 100, totalConnections: 0, reconnectMaps: [] },
-  "c3.eu.tankionline.com": { score: 100, totalConnections: 0, reconnectMaps: [] },
-  "c4.eu.tankionline.com": { score: 100, totalConnections: 0, reconnectMaps: [] },
-  "c5.eu.tankionline.com": { score: 100, totalConnections: 0, reconnectMaps: [] },
-  "c6.eu.tankionline.com": { score: 100, totalConnections: 0, reconnectMaps: [] },
-  "c7.eu.tankionline.com": { score: 100, totalConnections: 0, reconnectMaps: [] },
-  "c8.eu.tankionline.com": { score: 100, totalConnections: 0, reconnectMaps: [] },
+const FALLBACK_SERVERS = {
+  "c1.eu.tankionline.com": "9091",
+  "c2.eu.tankionline.com": "9092",
+  "c3.eu.tankionline.com": "9093",
+  "c4.eu.tankionline.com": "9094",
+  "c5.eu.tankionline.com": "9095",
+  "c6.eu.tankionline.com": "9096",
 };
-const servers = {
-  "c1.eu.tankionline.com": "9090",
-  "c2.eu.tankionline.com": "19090",
-  "c3.eu.tankionline.com": "9090",
-  "c4.eu.tankionline.com": "19090",
-  "c5.eu.tankionline.com": "9090",
-  "c6.eu.tankionline.com": "19090",
-  "c7.eu.tankionline.com": "9090",
-  "c8.eu.tankionline.com": "19090",
-};
+
+export let servers = { ...FALLBACK_SERVERS };
+export let serverScores = Object.fromEntries(
+  Object.keys(servers).map((host) => [host, { score: 100, totalConnections: 0, reconnectMaps: [] }])
+);
+
+export async function refreshServerList() {
+  try {
+    const response = await fetch("https://tankionline.com/s/status.js/", {
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+    const data = await response.json();
+    const nextServers = {};
+
+    for (const node of Object.values(data.nodes || {})) {
+      const endpoint = node?.endpoint;
+      const host = endpoint?.host;
+      const ports = endpoint?.wsPorts || [];
+      if (endpoint?.status === "NORMAL" && host && ports.length > 0) nextServers[host] = String(ports[0]);
+    }
+
+    if (Object.keys(nextServers).length === 0) throw new Error("empty server list");
+
+    const nextScores = {};
+    for (const host of Object.keys(nextServers)) {
+      nextScores[host] = serverScores[host] || { score: 100, totalConnections: 0, reconnectMaps: [] };
+    }
+
+    servers = nextServers;
+    serverScores = nextScores;
+    console.log(`[ServerList] Loaded ${Object.keys(servers).length} servers from status.js`);
+    return servers;
+  } catch (error) {
+    console.warn(`[ServerList] Could not load status.js (${error.message}); using fallback server list`);
+    return servers;
+  }
+}
 
 let captchaMaps = {};
 let allMaps = {};

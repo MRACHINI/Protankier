@@ -1,10 +1,10 @@
 {
   "name": "test",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "main": "main.js",
   "type": "module",
   "scripts": {
-    "test": "node --check main.js && node --check config.js && node --check Applications/clickAccount.js",
+    "test": "node --check main.js && node --check config.js && node --check Applications/clickAccount.js && node --check Connections/control/controlChannel.js",
     "commands": "node Utils/exportCommands.js"
   },
   "author": "",

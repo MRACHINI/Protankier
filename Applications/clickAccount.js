@@ -22,6 +22,16 @@ let averagePer10SecondsCounter = 0;
 // Global pool for continuous spam mode
 export const activeClickers = new Map();
 
+function normalizeMapLink(value) {
+  if (typeof value !== "string") return value;
+  const input = value.trim();
+  // Accept a raw map ID, a full battle URL (.../battle/<id>) or ...?battle=<id>
+  const match = input.match(/battle[=/]([A-Za-z0-9]+)/i);
+  if (match) return match[1];
+  if (input.includes("=")) return input.split("=").pop().trim();
+  return input.replace(/\/+$/, "");
+}
+
 async function clickAccount(Nickname, Password, rank, Map, Side, io, tankiConfig, proxyUrl) {
   return new Promise(async (resolve) => {
     let spaceTwo = null;
@@ -45,7 +55,7 @@ async function clickAccount(Nickname, Password, rank, Map, Side, io, tankiConfig
     const logger = new Logger(Nickname);
     const accountState = { ID: "", Server: "", online: "", Rank: "", Map: "", Nickname: "", ReconnectServer: "", minRank: 0, maxRank: 0 };
     
-    if (Map.includes("=")) Map = Map.split("=")[1];
+    Map = normalizeMapLink(Map);
     const start_time = performance.now();
     const BattleObject = new Battle(Map);
 
