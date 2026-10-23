@@ -15,6 +15,14 @@ export const CAPTCHA_THREADS = process.env.CAPTCHA_THREADS;
 export const CAPTCHA_POOL_SIZE = process.env.CAPTCHA_POOL_SIZE;
 export const CAPSOLVER_API_KEY = process.env.CAPSOLVER_API_KEY;
 
+// reCAPTCHA site key used by the Tanki login form. The key is domain-locked
+// to tankionline.com, so the widget must be solved there (the UI provides a
+// bookmarklet/console snippet) and the resulting token is relayed to us.
+// Space Two also sends the live key in the CaptchaCC packet; this is only a
+// fallback for the case where that packet has not been parsed yet.
+export const LOGIN_CAPTCHA_SITE_KEY =
+  process.env.LOGIN_CAPTCHA_SITE_KEY || "6LfNI_srAAAAACptxRSLfhdOMuyZuYJq1d5khles";
+
 // ============================================================
 // CLICKER CONFIGURATION
 // ============================================================

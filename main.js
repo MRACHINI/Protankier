@@ -3,7 +3,7 @@ import { createServer } from "http";
 import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
-import clickAccount from "./Applications/clickAccount.js";
+import clickAccount, { submitLoginCaptcha } from "./Applications/clickAccount.js";
 import leaveAccount from "./Applications/leaveAccount.js";
 import { refreshServerList } from "./Connections/control/controlChannel.js";
 import { SPAM_MODE } from "./config.js";
@@ -71,6 +71,11 @@ io.on("connection", async (socket) => {
       console.log(event, [{ ...safeData, password: "***" }]);
       return;
     }
+    if (event === "submit-login-captcha" && args[0]) {
+      const { token, ...safeData } = args[0];
+      console.log(event, [{ ...safeData, token: "***" }]);
+      return;
+    }
     console.log(event, args);
   });
 
@@ -92,6 +97,18 @@ io.on("connection", async (socket) => {
     // Restarts pm2
     socket.emit("new-message", { color: "green", message: `Clicker ${data} was restarted.` });
     process.exit();
+  });
+
+  socket.on("submit-login-captcha", (data) => {
+    const { account, token } = data || {};
+    const accepted = submitLoginCaptcha(account, token);
+    socket.emit("login-captcha-result", {
+      account,
+      ok: accepted,
+      message: accepted
+        ? "Token submitted, waiting for the server..."
+        : "No pending captcha for this account (it may have expired).",
+    });
   });
 });
 

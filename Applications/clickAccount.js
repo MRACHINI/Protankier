@@ -11,7 +11,7 @@ import dotenv from "dotenv";
 import leaveAccount from "./leaveAccount.js";
 import { performance } from "perf_hooks";
 import Battle from "../Components/Battle.js";
-import { MAX_CLICKER_INTERVAL_TIMEOUT, SPAM_MODE, CONTINUOUS_SPAM_ENABLED, CONTINUOUS_SPAM_INTERVAL } from "../config.js";
+import { MAX_CLICKER_INTERVAL_TIMEOUT, SPAM_MODE, CONTINUOUS_SPAM_ENABLED, CONTINUOUS_SPAM_INTERVAL, LOGIN_CAPTCHA_SITE_KEY } from "../config.js";
 
 dotenv.config({ path: "../.env" });
 
@@ -21,6 +21,49 @@ let averagePer10SecondsCounter = 0;
 
 // Global pool for continuous spam mode
 export const activeClickers = new Map();
+
+// Pending manual login captchas, keyed by lower-cased account nickname.
+// The UI submits a reCAPTCHA token through submitLoginCaptcha() and the
+// login flow waiting in clickAccount() picks it up.
+const pendingLoginCaptchas = new Map();
+
+function waitForLoginCaptcha(account, timeoutMs = 5 * 60 * 1000) {
+  const key = String(account).toLowerCase();
+  const existing = pendingLoginCaptchas.get(key);
+  if (existing) existing.cancel();
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (token) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (pendingLoginCaptchas.get(key)?.finish === finish) {
+        pendingLoginCaptchas.delete(key);
+      }
+      resolve(token);
+    };
+    const timer = setTimeout(() => finish(null), timeoutMs);
+
+    pendingLoginCaptchas.set(key, {
+      finish,
+      cancel: () => finish(null),
+    });
+  });
+}
+
+function cancelLoginCaptcha(account) {
+  const pending = pendingLoginCaptchas.get(String(account).toLowerCase());
+  if (pending) pending.cancel();
+}
+
+export function submitLoginCaptcha(account, token) {
+  if (!account || typeof token !== "string" || token.trim() === "") return false;
+  const pending = pendingLoginCaptchas.get(String(account).toLowerCase());
+  if (!pending) return false;
+  pending.finish(token.trim());
+  return true;
+}
 
 function normalizeMapLink(value) {
   if (typeof value !== "string") return value;
@@ -49,6 +92,7 @@ async function clickAccount(Nickname, Password, rank, Map, Side, io, tankiConfig
     let isDeadMap = false;
     let hashResponseHasNotArrived = false;
     let wrongPassOrBlock = false;
+    let loginCaptchaFailed = false;
     let battleMapResetListener = () => {};
     let isPause = false;
     
@@ -77,6 +121,7 @@ async function clickAccount(Nickname, Password, rank, Map, Side, io, tankiConfig
 
     function listener() {
       hasBeenClosedByUser = true;
+      cancelLoginCaptcha(Nickname);
       controlChannel.close();
     }
 
@@ -123,6 +168,7 @@ async function clickAccount(Nickname, Password, rank, Map, Side, io, tankiConfig
       .then(async () => {
         // Default actions
         isClicking = false;
+        cancelLoginCaptcha(Nickname);
         closeAll();
         battleMapResetListener();
         clearInterval(clickingInterval);
@@ -149,6 +195,14 @@ async function clickAccount(Nickname, Password, rank, Map, Side, io, tankiConfig
 
         if (wrongPassOrBlock) {
           resolve();
+          return;
+        }
+
+        if (loginCaptchaFailed) {
+          logger.loggerIoEmit("update-status", { account: Nickname, status: "Captcha failed" }, io);
+          logger.loggerIoEmit("close-click-session", Nickname, io);
+          logger.info(`[${Nickname} - Login captcha failed]`);
+          resolve(`[${Nickname} - Captcha failed]`);
           return;
         }
 
@@ -280,6 +334,108 @@ async function clickAccount(Nickname, Password, rank, Map, Side, io, tankiConfig
 
     await spaceTwo.connectToServer();
     logger.info("Space Two connected, waiting for SV_ReadyToLogin");
+
+    // Login captcha handling (Space Two). The server asks for a reCAPTCHA
+    // right after CL_loginByPassword. The site key is domain-locked to
+    // tankionline.com, so the widget cannot be rendered on our domain. The UI
+    // instead lets the user solve it on Tanki's page and submits the token,
+    // which we relay to the server.
+    let loginCaptchaRequested = false;
+    let loginFollowUpSeen = false;
+
+    spaceTwo.registerPacket("SV_loginFollowUp", () => {
+      loginFollowUpSeen = true;
+    });
+
+    const handleLoginCaptcha = async () => {
+      logger.info("Login captcha requested");
+      logger.loggerIoEmit("new-message", { color: "orange", message: `${Nickname} - Login captcha required` }, io);
+      logger.loggerIoEmit("update-status", { account: Nickname, status: "Captcha required" }, io);
+
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        logger.loggerIoEmit(
+          "login-captcha-required",
+          {
+            account: Nickname,
+            siteKey: spaceTwo.captchaSiteKey || LOGIN_CAPTCHA_SITE_KEY,
+            location: 0,
+            attempt,
+          },
+          io
+        );
+
+        const token = await Promise.race([
+          waitForLoginCaptcha(Nickname),
+          spaceTwo.waitForClose().then(() => null).catch(() => null),
+        ]);
+
+        if (!token) {
+          logger.info("Login captcha timed out or Space Two closed");
+          logger.loggerIoEmit("login-captcha-result", { account: Nickname, ok: false, message: "Captcha timed out" }, io);
+          logger.loggerIoEmit("new-message", { color: "red", message: `${Nickname} - Captcha timed out` }, io);
+          loginCaptchaFailed = true;
+          controlChannel.close();
+          spaceTwo.close();
+          return;
+        }
+
+        loginCaptchaFailed = false;
+        logger.info(`Submitting login captcha token (${token.length} chars)`);
+        logger.loggerIoEmit("login-captcha-result", { account: Nickname, ok: true, message: "Token submitted, waiting for the server..." }, io);
+
+        try {
+          await spaceTwo.sendPacket("CaptchaModelServer_checkCaptcha", { captchaSolution: token, location: 0 });
+        } catch (err) {
+          logger.error("Failed to send login captcha token", err);
+          loginCaptchaFailed = true;
+          controlChannel.close();
+          spaceTwo.close();
+          return;
+        }
+
+        // Some server versions send an explicit failure packet, others just
+        // drop the connection. Wait briefly so we can re-prompt if needed.
+        const outcome = await Promise.race([
+          spaceTwo.waitForPacket("SV_loginFollowUp").then(() => "correct"),
+          spaceTwo.waitForPacket("CaptchaModelBase_captchaFailed").then(() => "failed"),
+          new Promise((resolveOutcome) => setTimeout(() => resolveOutcome("unknown"), 10000)),
+        ]);
+
+        const socketClosed = spaceTwo.socket?.readyState === 3; // WebSocket.CLOSED
+        if (outcome === "failed" || (socketClosed && !loginFollowUpSeen)) {
+          logger.info("Login captcha rejected by server");
+          loginCaptchaFailed = true;
+          logger.loggerIoEmit("login-captcha-result", { account: Nickname, ok: false, message: "Captcha rejected. Solve a new one." }, io);
+          logger.loggerIoEmit("new-message", { color: "orange", message: `${Nickname} - Captcha rejected, try again` }, io);
+
+          if (socketClosed) {
+            controlChannel.close();
+            return;
+          }
+          continue;
+        }
+
+        if (outcome === "correct" || loginFollowUpSeen) {
+          logger.info("Login captcha accepted");
+          logger.loggerIoEmit("login-captcha-result", { account: Nickname, ok: true, message: "Captcha accepted" }, io);
+        }
+        return;
+      }
+
+      logger.info("Login captcha failed after 3 attempts");
+      loginCaptchaFailed = true;
+      controlChannel.close();
+      spaceTwo.close();
+    };
+
+    spaceTwo.registerPacket("CaptchaModelBase_showCaptcha", async () => {
+      if (loginCaptchaRequested) return;
+      loginCaptchaRequested = true;
+      await handleLoginCaptcha();
+    });
+    spaceTwo.registerPacket("CaptchaCC", async () => {
+      logger.info("CaptchaCC received");
+    });
 
     // Registers login handler
     const readyToLogin = await Promise.race([

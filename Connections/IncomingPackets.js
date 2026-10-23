@@ -280,6 +280,12 @@ const IncomingPackets = [
     space: "Five",
   },
   {
+    name: "CaptchaModelBase_showCaptcha",
+    description: "Login captcha request on Space Two (location and captcha payload may be empty)",
+    packetId: "53b7950af0feb087",
+    space: "Two",
+  },
+  {
     name: "CaptchaCC",
     description: "Captcha packet, contains info about captcha client",
     packetId: "1d417d595b3e5011",
@@ -292,10 +298,22 @@ const IncomingPackets = [
     space: "Five",
   },
   {
+    name: "CaptchaModelBase_captchaCorrect",
+    description: "Login captcha accepted on Space Two",
+    packetId: "455e191344eba054",
+    space: "Two",
+  },
+  {
     name: "CaptchaModelBase_captchaFailed",
     description: "Captcha failed packet, this packet is sent when the captcha is wrong",
     packetId: "0a7ee808e585f713",
     space: "Five",
+  },
+  {
+    name: "CaptchaModelBase_captchaFailed",
+    description: "Login captcha rejected on Space Two",
+    packetId: "0a7ee808e585f713",
+    space: "Two",
   },
 ];
 

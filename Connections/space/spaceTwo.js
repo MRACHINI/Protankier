@@ -6,6 +6,8 @@ import messages from "../../Commands/spaceCommands/spaceTwo.js";
 import Logger from "../../Logger/Logger.js";
 import methods from "../../Commands/spaceCommands/methodIds.js";
 import { CL_dependeciesLoaded, CL_login, CL_loginByHash, CL_loginFollowUp, CL_registerUid } from "../../Commands/spaceCommands/commands.js";
+import CaptchaModelServer_getNewCaptcha from "../../Commands/spaceCommands/CaptchaModelServer_getNewCaptcha.js";
+import CaptchaModelServer_checkCaptcha from "../../Commands/spaceCommands/CaptchaModelServer_checkCaptcha.js";
 import { HttpsProxyAgent } from "https-proxy-agent";
 
 const spaceIdString = "100045260"; // Used for logs
@@ -25,6 +27,7 @@ class SpaceTwo extends Space {
     this.cypher = null;
     this.allComingPacketPromises = [];
     this.proxyUrl = proxyUrl;
+    this.captchaSiteKey = null;
   }
 
   getSpaceId() {
@@ -56,6 +59,20 @@ class SpaceTwo extends Space {
         if (event.data.byteLength == 3) return; // Ignore ping packets
         this.packetsCounter++;
         const orginialunencryptedBuffer = unencryptedData.toString("hex");
+
+        // CaptchaCC carries the reCAPTCHA site key as a plain ASCII string.
+        // Grab it so the UI can render a widget with the current key even if
+        // Tanki rotates it.
+        if (!this.captchaSiteKey) {
+          const siteKeyMatch = unencryptedData
+            .toString("latin1")
+            .match(/6L[a-zA-Z0-9_-]{38}/);
+          if (siteKeyMatch) {
+            this.captchaSiteKey = siteKeyMatch[0];
+            this.logger.info(`Captcha site key: ${this.captchaSiteKey}`);
+          }
+        }
+
         let splittedPacket = orginialunencryptedBuffer.split(spaceIdInString);
 
         for (let i = 0; i < splittedPacket.length; i++) {
@@ -176,6 +193,10 @@ class SpaceTwo extends Space {
         return new CL_registerUid(payload.Nickname, payload.Password).serialize();
       case "CL_loginByPassword":
         return new CL_login(payload).serialize();
+      case "CaptchaModelServer_getNewCaptcha":
+        return new CaptchaModelServer_getNewCaptcha({ spaceId: 100045260n, location: 0 }).serialize();
+      case "CaptchaModelServer_checkCaptcha":
+        return new CaptchaModelServer_checkCaptcha({ ...payload, spaceId: 100045260n, location: payload.location ?? 0 }).serialize();
       default:
         return "Packet not handeled";
     }

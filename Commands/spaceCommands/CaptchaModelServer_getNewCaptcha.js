@@ -1,7 +1,8 @@
 class CaptchaModelServer_getNewCaptcha {
-    constructor() {
-        this.spaceId = 100072911n
-        this.methodId = 7369561336714029596n
+    constructor({ spaceId = 100072911n, location = 6, captchaPrefix } = {}) {
+        this.spaceId = BigInt(spaceId);
+        this.methodId = 7369561336714029596n;
+        this.location = captchaPrefix !== undefined ? captchaPrefix : location;
     }
 
     serialize() {
@@ -22,7 +23,7 @@ class CaptchaModelServer_getNewCaptcha {
         pos+=8;
         view.setBigInt64(pos, values[1]); // Method ID
         pos+=8;
-        view.setUint32(pos, 6); // constant
+        view.setUint32(pos, this.location); // Captcha location enum
 
         return buffer;
     }

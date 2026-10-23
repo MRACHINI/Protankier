@@ -160,6 +160,73 @@
         }
         .mode-badge.reactive { background: rgba(255, 165, 0, 0.3); color: #ff9900; }
         .mode-badge.continuous { background: rgba(0, 255, 136, 0.3); color: #00ff88; }
+        .captcha-panel {
+            border-color: rgba(255, 165, 0, 0.6);
+            box-shadow: 0 0 25px rgba(255, 165, 0, 0.15);
+        }
+        .captcha-panel h2 { color: #ffb347; }
+        .captcha-steps { margin: 10px 0 16px 22px; line-height: 1.7; color: #ccc; }
+        .captcha-steps li { margin-bottom: 6px; }
+        .captcha-steps kbd {
+            background: rgba(255, 255, 255, 0.12);
+            border: 1px solid rgba(255, 255, 255, 0.25);
+            border-radius: 4px;
+            padding: 1px 6px;
+            font-family: inherit;
+        }
+        .snippet-box {
+            background: rgba(0, 0, 0, 0.45);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 12px;
+        }
+        .snippet-box pre {
+            white-space: pre-wrap;
+            word-break: break-all;
+            font-family: 'Courier New', monospace;
+            font-size: 0.78em;
+            color: #9fe8ff;
+            max-height: 150px;
+            overflow-y: auto;
+            margin-bottom: 10px;
+        }
+        .btn-small {
+            display: inline-block;
+            padding: 8px 14px;
+            font-size: 0.85em;
+            margin: 0;
+            width: auto;
+        }
+        #captchaBookmarklet {
+            display: inline-block;
+            padding: 9px 16px;
+            border-radius: 8px;
+            background: linear-gradient(135deg, #00d4ff 0%, #0099cc 100%);
+            color: #001018;
+            font-weight: 700;
+            text-decoration: none;
+            font-size: 0.85em;
+            cursor: grab;
+        }
+        #captchaToken {
+            width: 100%;
+            min-height: 90px;
+            resize: vertical;
+            background: rgba(0, 0, 0, 0.35);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 8px;
+            color: #eee;
+            padding: 10px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.8em;
+            margin-bottom: 12px;
+        }
+        .captcha-status { margin-top: 10px; font-size: 0.9em; color: #ffb347; }
+        .captcha-status.ok { color: #00ff88; }
+        .captcha-status.error { color: #ff6b6b; }
+        .captcha-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+        .captcha-actions button { flex: 1; min-width: 160px; }
     </style>
 </head>
 <body>
@@ -169,6 +236,35 @@
         <div id="connectionStatus">
             <span class="status-indicator status-connected"></span>
             <span id="statusText">Connecting...</span>
+        </div>
+
+        <div class="panel captcha-panel" id="captchaPanel" style="display: none;">
+            <h2>🔐 Login Captcha Required</h2>
+            <p style="margin-bottom: 12px; color: #ccc;">
+                Account: <strong id="captchaAccount" style="color: #ffb347;"></strong>
+                <span id="captchaAttempt" style="color: #888; font-size: 0.85em;"></span>
+            </p>
+            <ol class="captcha-steps">
+                <li>Click <strong>Open Tanki captcha page</strong> (or open <a href="https://tankionline.com/play/" target="_blank" rel="noopener" style="color: #00d4ff;">tankionline.com/play</a> yourself).</li>
+                <li>On that page, click the <strong>Solve captcha</strong> bookmarklet (drag it to your bookmarks bar once) <em>or</em> paste the console snippet into DevTools → Console.</li>
+                <li>Solve the reCAPTCHA. The token is copied automatically and, when this page opened Tanki, sent back here.</li>
+                <li>Click <strong>Submit Token</strong>. reCAPTCHA tokens expire after about two minutes.</li>
+            </ol>
+            <div style="display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; align-items: center;">
+                <button class="btn-small" onclick="openTankiCaptcha()">🌐 Open Tanki captcha page</button>
+                <a id="captchaBookmarklet" href="#" onclick="event.preventDefault(); addLog('Drag this button to your bookmarks bar, then click it on the Tanki tab.', 'warning');">🔖 Solve captcha</a>
+            </div>
+            <div class="snippet-box">
+                <div style="font-size: 0.85em; color: #888; margin-bottom: 8px;">Console snippet (alternative to the bookmarklet):</div>
+                <pre id="captchaSnippet"></pre>
+                <button class="btn-small" onclick="copyCaptchaSnippet()">📋 Copy snippet</button>
+            </div>
+            <textarea id="captchaToken" placeholder="Paste the reCAPTCHA token here..."></textarea>
+            <div class="captcha-actions">
+                <button onclick="submitCaptchaToken()" id="captchaSubmitBtn">✅ Submit Token</button>
+                <button class="btn-warning" onclick="hideCaptchaPanel()">Close</button>
+            </div>
+            <div id="captchaStatus" class="captcha-status"></div>
         </div>
         
         <div class="panel">
@@ -318,6 +414,136 @@
         socket.on('close-click-session', (data) => {
             addLog(data, 'info');
         });
+
+        // ------------------------------------------------------------
+        // Manual login captcha relay
+        // The reCAPTCHA site key is locked to tankionline.com, so the user
+        // solves it there and we forward the token to the backend.
+        // ------------------------------------------------------------
+        let captchaAccount = null;
+        let captchaSiteKey = '6LfNI_srAAAAACptxRSLfhdOMuyZuYJq1d5khles';
+
+        function captchaWidgetCode(siteKey) {
+            return [
+                '(function(){',
+                'var KEY=' + JSON.stringify(siteKey) + ';',
+                'var old=document.getElementById("__tanki_captcha_overlay");if(old)old.remove();',
+                'var box=document.createElement("div");',
+                'box.id="__tanki_captcha_overlay";',
+                'box.style.cssText="position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,.88);display:flex;align-items:center;justify-content:center;flex-direction:column;gap:14px;font:16px system-ui,sans-serif;color:#fff;padding:20px;text-align:center";',
+                'box.innerHTML=\'<div style="font-size:20px;font-weight:600">Tanki login captcha</div><div id="__tc_slot" style="background:#fff;padding:16px;border-radius:10px;min-width:304px;min-height:78px"></div><div id="__tc_msg">Loading reCAPTCHA...</div><textarea id="__tc_token" readonly style="display:none;width:min(92vw,900px);height:110px;font:12px monospace;padding:8px"></textarea>\';',
+                'document.body.appendChild(box);',
+                'function finish(token){',
+                'window.__tankiCaptchaToken=token;',
+                'var msg=document.getElementById("__tc_msg");',
+                'var ta=document.getElementById("__tc_token");',
+                'ta.style.display="block";ta.value=token;ta.focus();ta.select();',
+                'try{document.execCommand("copy");msg.textContent="Token copied to clipboard. Paste it into the Protankier captcha panel.";}catch(e){msg.textContent="Token ready. Copy it into the Protankier captcha panel.";}',
+                'if(navigator.clipboard)navigator.clipboard.writeText(token).catch(function(){});',
+                'try{if(window.opener)window.opener.postMessage({type:"tanki-captcha-token",token:token},"*");}catch(e){}',
+                '}',
+                'function render(){try{grecaptcha.render("__tc_slot",{sitekey:KEY,callback:finish});document.getElementById("__tc_msg").textContent="Solve the captcha below.";}catch(e){document.getElementById("__tc_msg").textContent="Could not render reCAPTCHA: "+e;}}',
+                'if(window.grecaptcha&&grecaptcha.render){render();}else{',
+                'window.__tankiCaptchaInit=render;',
+                'var s=document.createElement("script");',
+                's.src="https://www.google.com/recaptcha/api.js?onload=__tankiCaptchaInit&render=explicit";',
+                's.onerror=function(){document.getElementById("__tc_msg").textContent="Failed to load reCAPTCHA.";};',
+                'document.head.appendChild(s);',
+                '}',
+                '})();'
+            ].join('');
+        }
+
+        function refreshCaptchaSnippet() {
+            const code = captchaWidgetCode(captchaSiteKey);
+            document.getElementById('captchaSnippet').textContent = code;
+            document.getElementById('captchaBookmarklet').href = 'javascript:' + encodeURIComponent(code);
+        }
+
+        function setCaptchaStatus(text, kind) {
+            const el = document.getElementById('captchaStatus');
+            el.textContent = text;
+            el.className = 'captcha-status' + (kind ? ' ' + kind : '');
+        }
+
+        function openTankiCaptcha() {
+            window.__tankiCaptchaTab = window.open('https://tankionline.com/play/', 'tankiCaptchaTab');
+            addLog('Opened tankionline.com. Use the bookmarklet or console snippet there.', 'info');
+        }
+
+        function copyCaptchaSnippet() {
+            const text = document.getElementById('captchaSnippet').textContent;
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text)
+                    .then(() => addLog('Snippet copied to clipboard.', 'success'))
+                    .catch(() => addLog('Copy failed. Select the snippet and copy it manually.', 'error'));
+            } else {
+                addLog('Clipboard unavailable. Select the snippet and copy it manually.', 'warning');
+            }
+        }
+
+        function submitCaptchaToken() {
+            const token = document.getElementById('captchaToken').value.trim();
+            if (!captchaAccount) {
+                addLog('No account is waiting for a captcha.', 'error');
+                return;
+            }
+            if (!token) {
+                addLog('Paste the reCAPTCHA token first.', 'error');
+                return;
+            }
+            const btn = document.getElementById('captchaSubmitBtn');
+            btn.disabled = true;
+            setTimeout(() => { btn.disabled = false; }, 4000);
+            setCaptchaStatus('Submitting token...', '');
+            socket.emit('submit-login-captcha', { account: captchaAccount, token });
+            addLog(`Submitting captcha token for ${captchaAccount}`, 'info');
+        }
+
+        function hideCaptchaPanel() {
+            document.getElementById('captchaPanel').style.display = 'none';
+        }
+
+        function showCaptchaPanel(account) {
+            captchaAccount = account || captchaAccount;
+            document.getElementById('captchaAccount').textContent = captchaAccount || 'unknown';
+            refreshCaptchaSnippet();
+            const panel = document.getElementById('captchaPanel');
+            panel.style.display = 'block';
+            panel.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+
+        socket.on('login-captcha-required', (data) => {
+            const info = data || {};
+            captchaAccount = info.account || captchaAccount;
+            if (info.siteKey) captchaSiteKey = info.siteKey;
+            document.getElementById('captchaAccount').textContent = captchaAccount || 'unknown';
+            document.getElementById('captchaAttempt').textContent = info.attempt && info.attempt > 1 ? `(attempt ${info.attempt})` : '';
+            document.getElementById('captchaToken').value = '';
+            refreshCaptchaSnippet();
+            setCaptchaStatus('Solve the captcha on Tanki, then submit the token here.', '');
+            showCaptchaPanel(captchaAccount);
+            addLog(`${captchaAccount}: login captcha required`, 'warning');
+        });
+
+        socket.on('login-captcha-result', (data) => {
+            const info = data || {};
+            if (info.account && captchaAccount && info.account !== captchaAccount) return;
+            const message = info.message || (info.ok ? 'Token submitted.' : 'Captcha failed.');
+            setCaptchaStatus(message, info.ok ? 'ok' : 'error');
+            addLog(`${captchaAccount || info.account || 'Captcha'}: ${message}`, info.ok ? 'success' : 'error');
+            if (info.ok && /accepted/i.test(message)) {
+                setTimeout(hideCaptchaPanel, 2000);
+            }
+        });
+
+        window.addEventListener('message', (event) => {
+            const data = event.data;
+            if (!data || data.type !== 'tanki-captcha-token' || typeof data.token !== 'string') return;
+            document.getElementById('captchaToken').value = data.token;
+            setCaptchaStatus('Token received from the Tanki tab. Click Submit Token.', 'ok');
+            addLog('Captcha token received from the Tanki tab.', 'success');
+        });
         
         function updateConnectionStatus(connected) {
             const statusDiv = document.getElementById('connectionStatus');
@@ -349,7 +575,10 @@
             accounts.forEach((acc, nickname) => {
                 const card = document.createElement('div');
                 card.className = 'account-card';
-                card.innerHTML = `<h3>${acc.nickname}</h3><div class="status ${acc.status === 'Glitched' ? 'online' : 'offline'}">${acc.status}</div>`;
+                const captchaButton = acc.status === 'Captcha required'
+                    ? `<button class="btn-small" style="margin-top: 10px;" onclick="showCaptchaPanel('${acc.nickname}')">🔐 Solve captcha</button>`
+                    : '';
+                card.innerHTML = `<h3>${acc.nickname}</h3><div class="status ${acc.status === 'Glitched' ? 'online' : 'offline'}">${acc.status}</div>${captchaButton}`;
                 list.appendChild(card);
             });
         }
