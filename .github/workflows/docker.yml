@@ -21,10 +21,25 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Rust compile (visible output)
+        id: rust
+        continue-on-error: true
         run: |
           rustup toolchain install stable --profile minimal
-          cargo build --release -p server-click
-        working-directory: .
+          cargo build --release -p server-click > cargo-build.log 2>&1
+          echo "exit=$?" >> cargo-build.log
+          tail -n 400 cargo-build.log
+
+      - name: Upload compile log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-build-log
+          path: cargo-build.log
+          if-no-files-found: ignore
+
+      - name: Fail if Rust build failed
+        if: steps.rust.outcome == 'failure'
+        run: exit 1
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
