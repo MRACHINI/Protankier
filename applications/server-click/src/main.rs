@@ -3,7 +3,7 @@ use std::time::Duration;
 use anyhow::Context;
 use clap::Parser;
 use fost_client_utils::{HostProxyProvider, Proxy, ProxyProvider, Session, SocksProxyProvider, Task, DummyResourceLoader, LowLevelPing, SessionPing};
-use fost_protocol::{packets::{self, Packet, PacketDowncast}, codec::{BattleTeam, LayoutState}, PacketDebugFilter, SimplePacketDebugFilter};
+use fost_protocol::{packets::{self, Packet, PacketDowncast}, PacketDebugFilter, SimplePacketDebugFilter};
 use tokio::{sync::oneshot, time::timeout};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -166,24 +166,19 @@ async fn run_click(args: &Args) -> anyhow::Result<()> {
         .await?;
     info!("Account Rank: {}", account_rank);
 
-    let team = match args.side.as_str() {
-        "Alpha" => BattleTeam::Red,
-        "Bravo" => BattleTeam::Blue,
-        _ => BattleTeam::None,
-    };
+    let retry = Duration::from_millis(args.retry_ms);
+    let session_timeout = Duration::from_secs(args.session_timeout_sec);
 
-    let selected = session
-        .execute_task(TaskSelectBattle::new(args.map.clone()))
+    let alive = session
+        .execute_task(TaskQueryBattle::new(args.map.clone()))
         .await?;
-    if !selected {
+    if !alive {
         anyhow::bail!("dead link");
     }
-    info!("{} - Selected battle {}", args.username, args.map);
+    info!("{} - Battle {} is alive", args.username, args.map);
 
-    let retry = Duration::from_millis(args.retry_ms);
-    join_battle(&mut session, team, retry, &args.username).await?;
+    enter_battle(&mut session, &args.map, retry, &args.username).await?;
 
-    let session_timeout = Duration::from_secs(args.session_timeout_sec);
     if args.join_on_leave {
         info!("{} - Watching for free slots", args.username);
         loop {
@@ -192,8 +187,8 @@ async fn run_click(args: &Args) -> anyhow::Result<()> {
             })).await;
             match left {
                 Ok(Ok(())) => {
-                    info!("{} - A user left, trying to join", args.username);
-                    join_battle(&mut session, team, retry, &args.username).await?;
+                    info!("{} - A user left, re-entering battle", args.username);
+                    enter_battle(&mut session, &args.map, retry, &args.username).await?;
                 }
                 Ok(Err(error)) => return Err(error),
                 Err(_) => {
@@ -208,39 +203,39 @@ async fn run_click(args: &Args) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn join_battle(session: &mut Session, team: BattleTeam, retry: Duration, username: &str) -> anyhow::Result<()> {
+async fn enter_battle(session: &mut Session, link: &str, retry: Duration, username: &str) -> anyhow::Result<()> {
     loop {
-        match timeout(retry, session.execute_task(TaskJoinBattle::new(team))).await {
+        match timeout(retry, session.connection.send_packet(&packets::c2s::ActivateLink { link: link.to_string() })).await {
             Ok(Ok(())) => {
-                info!("{} - Joined map", username);
+                info!("{} - Sent ActivateLink {}", username, link);
                 return Ok(());
             }
-            Ok(Err(error)) => return Err(error),
+            Ok(Err(error)) => return Err(error.into()),
             Err(_) => {}
         }
     }
 }
 
-struct TaskSelectBattle {
+struct TaskQueryBattle {
     battle_id: String,
     sent: bool,
-    tx: Option<oneshot::Sender<anyhow::Result<bool>>>,
-    rx: Option<oneshot::Receiver<anyhow::Result<bool>>>,
+    tx: Option<oneshot::Sender<bool>>,
+    rx: Option<oneshot::Receiver<bool>>,
 }
 
-impl TaskSelectBattle {
+impl TaskQueryBattle {
     fn new(battle_id: String) -> Self {
         let (tx, rx) = oneshot::channel();
         Self { battle_id, sent: false, tx: Some(tx), rx: Some(rx) }
     }
 }
 
-impl Task for TaskSelectBattle {
+impl Task for TaskQueryBattle {
     type Result = bool;
 
     fn handle_packet(&mut self, _session: &mut Session, packet: &dyn Packet) -> anyhow::Result<()> {
-        let result = if let Some(p) = packet.downcast_ref::<packets::s2c::BattleListBattleSelect>() {
-            if p.item == self.battle_id { Some(true) } else { None }
+        let result = if let Some(p) = packet.downcast_ref::<packets::s2c::LinkResultAlive>() {
+            if p.battle_id == self.battle_id { Some(true) } else { None }
         } else if let Some(p) = packet.downcast_ref::<packets::s2c::LinkResultDead>() {
             if p.battle_id == self.battle_id { Some(false) } else { None }
         } else {
@@ -248,7 +243,7 @@ impl Task for TaskSelectBattle {
         };
 
         if let (Some(result), Some(tx)) = (result, self.tx.take()) {
-            let _ = tx.send(Ok(result));
+            let _ = tx.send(result);
         }
         Ok(())
     }
@@ -256,63 +251,17 @@ impl Task for TaskSelectBattle {
     fn poll(&mut self, session: &mut Session, cx: &mut std::task::Context) -> std::task::Poll<anyhow::Result<Self::Result>> {
         if !self.sent {
             self.sent = true;
-            if let Err(error) = session.connection.send_packet(&packets::c2s::BattleListBattleSelect { item: self.battle_id.clone() }) {
+            if let Err(error) = session.connection.send_packet(&packets::c2s::Query { battle_id: self.battle_id.clone() }) {
                 return std::task::Poll::Ready(Err(error.into()));
             }
         }
         match self.rx.as_mut() {
             Some(rx) => match std::pin::Pin::new(rx).poll(cx) {
-                std::task::Poll::Ready(Ok(result)) => std::task::Poll::Ready(result),
-                std::task::Poll::Ready(Err(_)) => std::task::Poll::Ready(Err(anyhow::anyhow!("select channel closed"))),
+                std::task::Poll::Ready(Ok(result)) => std::task::Poll::Ready(Ok(result)),
+                std::task::Poll::Ready(Err(_)) => std::task::Poll::Ready(Err(anyhow::anyhow!("query channel closed"))),
                 std::task::Poll::Pending => std::task::Poll::Pending,
             },
-            None => std::task::Poll::Ready(Err(anyhow::anyhow!("select task already finished"))),
-        }
-    }
-}
-
-struct TaskJoinBattle {
-    team: BattleTeam,
-    sent: bool,
-    tx: Option<oneshot::Sender<()>>,
-    rx: Option<oneshot::Receiver<()>>,
-}
-
-impl TaskJoinBattle {
-    fn new(team: BattleTeam) -> Self {
-        let (tx, rx) = oneshot::channel();
-        Self { team, sent: false, tx: Some(tx), rx: Some(rx) }
-    }
-}
-
-impl Task for TaskJoinBattle {
-    type Result = ();
-
-    fn handle_packet(&mut self, _session: &mut Session, packet: &dyn Packet) -> anyhow::Result<()> {
-        if let Some(p) = packet.downcast_ref::<packets::s2c::LobbyLayoutSwitchStart>() {
-            if p.state == LayoutState::Battle {
-                if let Some(tx) = self.tx.take() {
-                    let _ = tx.send(());
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn poll(&mut self, session: &mut Session, cx: &mut std::task::Context) -> std::task::Poll<anyhow::Result<Self::Result>> {
-        if !self.sent {
-            self.sent = true;
-            if let Err(error) = session.connection.send_packet(&packets::c2s::BattleInfoJoinBattle { var_625: self.team }) {
-                return std::task::Poll::Ready(Err(error.into()));
-            }
-        }
-        match self.rx.as_mut() {
-            Some(rx) => match std::pin::Pin::new(rx).poll(cx) {
-                std::task::Poll::Ready(Ok(())) => std::task::Poll::Ready(Ok(())),
-                std::task::Poll::Ready(Err(_)) => std::task::Poll::Ready(Err(anyhow::anyhow!("join channel closed"))),
-                std::task::Poll::Pending => std::task::Poll::Pending,
-            },
-            None => std::task::Poll::Ready(Err(anyhow::anyhow!("join task already finished"))),
+            None => std::task::Poll::Ready(Err(anyhow::anyhow!("query task already finished"))),
         }
     }
 }
