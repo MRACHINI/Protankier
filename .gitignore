@@ -1,4 +1,7 @@
 node_modules/
-Logs/
-Logs/
-.env
+target/
+# Runtime config (contains saved account passwords)
+data/
+*.log
+target/
+applications/crystal-bot/src/user.txt

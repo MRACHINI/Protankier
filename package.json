@@ -1,26 +1,15 @@
 {
-  "name": "test",
-  "version": "1.0.6",
-  "main": "main.js",
+  "name": "protanki-clicker",
+  "version": "2.0.0",
+  "description": "ProTanki clicker: Node control service and web UI around the server-click Rust binary.",
+  "main": "server.js",
   "type": "module",
   "scripts": {
-    "test": "node --check main.js && node --check config.js && node --check Applications/clickAccount.js && node --check Connections/control/controlChannel.js && node --check Connections/space/spaceTwo.js && node --check Connections/IncomingPackets.js && node --check Commands/controlCommands/hashRequest.js && node --check Commands/spaceCommands/CaptchaModelServer_checkCaptcha.js",
-    "commands": "node Utils/exportCommands.js"
+    "start": "node server.js",
+    "check": "node --check server.js"
   },
-  "author": "",
   "license": "ISC",
-  "description": "",
   "dependencies": {
-    "dotenv": "16.3.1",
-    "hpagent": "1.2.0",
-    "https-proxy-agent": "7.0.6",
-    "ky": "1.7.4",
-    "pako": "2.1.0",
-    "socket.io": "4.5.4",
-    "ws": "8.11.0",
-    "zlib": "1.0.5"
-  },
-  "devDependencies": {
-    "jest": "^29.7.0"
+    "socket.io": "^4.7.1"
   }
 }

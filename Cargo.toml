@@ -1,0 +1,8 @@
+[workspace]
+
+members = [
+    "protocol",
+    "client-utils",
+    "applications/server-click",
+]
+resolver = "2"
