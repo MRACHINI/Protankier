@@ -25,6 +25,7 @@ jobs:
         continue-on-error: true
         run: |
           rustup toolchain install stable --profile minimal
+          cargo update -p time@0.3.21 --precise 0.3.36 || true
           cargo build --release -p server-click > cargo-build.log 2>&1
           echo "exit=$?" >> cargo-build.log
           tail -n 400 cargo-build.log

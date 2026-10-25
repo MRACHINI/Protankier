@@ -6,7 +6,8 @@ COPY Cargo.toml Cargo.lock ./
 COPY protocol ./protocol
 COPY client-utils ./client-utils
 COPY applications/server-click ./applications/server-click
-RUN cargo build --release -p server-click \
+RUN (cargo update -p time@0.3.21 --precise 0.3.36 || true) \
+ && cargo build --release -p server-click \
  && cp target/release/server-click /server-click
 
 FROM node:20-bookworm-slim
