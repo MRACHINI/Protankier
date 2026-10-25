@@ -1,8 +1,10 @@
 use std::{net::SocketAddr, task::{Poll, Context, Waker}, io::Cursor, pin::Pin};
+use std::io::Read as _;
 
 use crate::{crypto::{Cipher, PlainCipher, XOrCipher, CipherMode}, packets, ProtocolError, ProtocolResult, ConnectionClosedError, Socket};
 use crate::packets::{Packet, PacketRegistry, PacketDowncast};
 use byteorder::{ReadBytesExt, BigEndian, WriteBytesExt};
+use flate2::read::DeflateDecoder;
 use futures::prelude::*;
 use tracing::{warn, trace, debug};
 
@@ -178,8 +180,13 @@ impl Connection {
         }
 
         let mut reader = Cursor::new(&self.recv_buffer[0..self.recv_buffer_index]);
-        let packet_length = reader.read_u32::<BigEndian>()? as usize;
+        let header = reader.read_u32::<BigEndian>()?;
         let packet_id = reader.read_u32::<BigEndian>()?;
+
+        // The first byte carries flags (0x40 = raw-deflate compressed); only the
+        // lower 24 bits are the packet length, including the 8-byte header.
+        let packet_is_compressed = header & 0x4000_0000 != 0;
+        let packet_length = (header & 0x00FF_FFFF) as usize;
 
         if packet_length > 1024 * 1024 * 64 {
             return Poll::Ready(Err(ProtocolError::PacketTooLarge(packet_length)));
@@ -200,20 +207,32 @@ impl Connection {
         let trace_frames = std::env::var_os("FROST_TRACE_FRAMES").is_some();
         let raw_head: Vec<u8> = if trace_frames { packet_payload.iter().take(16).copied().collect() } else { Vec::new() };
         self.crypt_context.decrypt(packet_payload)?;
+
+        let decompressed_payload: Vec<u8> = if packet_is_compressed {
+            let mut decoder = DeflateDecoder::new(&packet_payload[..]);
+            let mut decompressed = Vec::with_capacity(packet_payload.len() * 4);
+            decoder.read_to_end(&mut decompressed)?;
+            if decompressed.len() > 1024 * 1024 * 64 {
+                return Poll::Ready(Err(ProtocolError::PacketTooLarge(decompressed.len())));
+            }
+            decompressed
+        } else {
+            packet_payload.to_vec()
+        };
+
         if trace_frames {
-            let head: Vec<u8> = packet_payload.iter().take(16).copied().collect();
-            eprintln!("[FRAME] len={} id={} raw_head={:02x?} decrypted_head={:02x?}", packet_length, packet_id as i32, raw_head, head);
+            eprintln!("[FRAME] len={} id={} compressed={} raw_head={:02x?} decrypted_head={:02x?} decompressed_len={}", packet_length, packet_id as i32, packet_is_compressed, raw_head, &decompressed_payload[..decompressed_payload.len().min(16)], decompressed_payload.len());
         }
 
-        let mut packet_reader = Cursor::new(packet_payload);
+        let mut packet_reader = Cursor::new(&decompressed_payload[..]);
         let packet = self.packet_registry.decode(&mut packet_reader, packet_id)?;
 
         if !packet_reader.position() < packet_reader.get_ref().len() as u64 {
-            warn!("Packet decoder did not read whole packet of id {} ({} out of {} bytes left).", packet_id as i32, packet_reader.get_ref().len() as u64 - packet_reader.position(), packet_length - 8);
+            warn!("Packet decoder did not read whole packet of id {} ({} out of {} bytes left).", packet_id as i32, packet_reader.get_ref().len() as u64 - packet_reader.position(), decompressed_payload.len());
         }
 
         if self.log_filter.should_log(false, Box::as_ref(&packet)) {
-            trace!("[IN ] {: >11} {: >2} {:?} ({} bytes)", packet.packet_id() as i32, packet.model_id(), packet, packet_length - 8);
+            trace!("[IN ] {: >11} {: >2} {:?} ({} bytes)", packet.packet_id() as i32, packet.model_id(), packet, decompressed_payload.len());
         }
 
         self.recv_buffer.copy_within(packet_length.., 0);
