@@ -63,5 +63,6 @@
     "scpacker.networking.protocol.codec.custom.CodecPremiumNotifierCC": "PremiumNotifierCC",
     "scpacker.networking.protocol.codec.custom.CodecTargetHit": "TargetHit",
     "scpacker.networking.protocol.codec.custom.CodecTipItemCC": "TipItemCC",
-    "scpacker.networking.protocol.codec.custom.CodecUidNotifierData": "UidNotifierData"
+    "scpacker.networking.protocol.codec.custom.CodecUidNotifierData": "UidNotifierData",
+    "scpacker.networking.protocol.codec.custom.VectorCodecSocialNetworkEntranceParams": "Vec<SocialNetworkEntranceParams>"
 }

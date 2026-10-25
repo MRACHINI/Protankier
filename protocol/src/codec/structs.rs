@@ -181,6 +181,11 @@ codec_struct!(StatisticsDMCC {
     users_info: Vec<UserInfo>
 });
 
+codec_struct!(SocialNetworkEntranceParams {
+    authorization_url: String
+    sn_id: String
+});
+
 codec_struct!(SocialNetworkPanelParams {
     authorization_url: String
     link_exists: bool

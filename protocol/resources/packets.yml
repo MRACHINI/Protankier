@@ -74,13 +74,12 @@ AccountLoginExternal:
       fields:
         login: scpacker.networking.protocol.codec.primitive.StringCodec
         password: scpacker.networking.protocol.codec.primitive.StringCodec
-    UnknownN1715719586:
+    LoadExternalEntrance:
       direction: X2X
       packet_id: -1715719586
       model_id: 3
       fields:
-        snId: scpacker.networking.protocol.codec.primitive.StringCodec
-        authorizationUrl: scpacker.networking.protocol.codec.primitive.StringCodec
+        socialNetworkEntranceParams: scpacker.networking.protocol.codec.custom.VectorCodecSocialNetworkEntranceParams
     Unknown1243673979:
       direction: X2X
       packet_id: 1243673979
