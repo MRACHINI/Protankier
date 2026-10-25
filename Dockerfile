@@ -11,6 +11,9 @@ RUN (cargo update -p time@0.3.21 --precise 0.3.36 || true) \
  && cp target/release/server-click /server-click
 
 FROM node:20-bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libssl3 ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
 ENV NODE_ENV=production \
     PORT=3005 \
     DATA_DIR=/data \
