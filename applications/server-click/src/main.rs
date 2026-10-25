@@ -4,7 +4,7 @@ use anyhow::Context;
 use clap::Parser;
 use fost_client_utils::{HostProxyProvider, Proxy, ProxyProvider, Session, SocksProxyProvider, Task, DummyResourceLoader, LowLevelPing, SessionPing};
 use fost_protocol::{packets::{self, Packet, PacketDowncast}, PacketDebugFilter, SimplePacketDebugFilter};
-use tokio::{sync::oneshot, time::timeout};
+use tokio::{sync::oneshot, time::{sleep, timeout}};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -96,11 +96,13 @@ impl Task for LoginTask {
     fn poll(&mut self, session: &mut Session, _cx: &mut std::task::Context) -> std::task::Poll<anyhow::Result<()>> {
         if !self.sent {
             self.sent = true;
-            session.connection.send_packet(&packets::c2s::AccountLoginExecute {
+            if let Err(error) = session.connection.send_packet(&packets::c2s::AccountLoginExecute {
                 login: self.username.clone(),
                 password: self.password.clone(),
                 remember: false,
-            })?;
+            }) {
+                return std::task::Poll::Ready(Err(error.into()));
+            }
         }
         std::task::Poll::Pending
     }
@@ -204,16 +206,10 @@ async fn run_click(args: &Args) -> anyhow::Result<()> {
 }
 
 async fn enter_battle(session: &mut Session, link: &str, retry: Duration, username: &str) -> anyhow::Result<()> {
-    loop {
-        match timeout(retry, session.connection.send_packet(&packets::c2s::ActivateLink { link: link.to_string() })).await {
-            Ok(Ok(())) => {
-                info!("{} - Sent ActivateLink {}", username, link);
-                return Ok(());
-            }
-            Ok(Err(error)) => return Err(error.into()),
-            Err(_) => {}
-        }
-    }
+    session.connection.send_packet(&packets::c2s::LinkActivateLink { link: link.to_string() })?;
+    info!("{} - Sent ActivateLink {}", username, link);
+    sleep(retry).await;
+    Ok(())
 }
 
 struct TaskQueryBattle {
@@ -248,19 +244,17 @@ impl Task for TaskQueryBattle {
         Ok(())
     }
 
-    fn poll(&mut self, session: &mut Session, cx: &mut std::task::Context) -> std::task::Poll<anyhow::Result<Self::Result>> {
+    fn poll(&mut self, session: &mut Session, _cx: &mut std::task::Context) -> std::task::Poll<anyhow::Result<Self::Result>> {
         if !self.sent {
             self.sent = true;
-            if let Err(error) = session.connection.send_packet(&packets::c2s::Query { battle_id: self.battle_id.clone() }) {
+            if let Err(error) = session.connection.send_packet(&packets::c2s::LinkQuery { battle_id: self.battle_id.clone() }) {
                 return std::task::Poll::Ready(Err(error.into()));
             }
         }
-        match self.rx.as_mut() {
-            Some(rx) => match std::pin::Pin::new(rx).poll(cx) {
-                std::task::Poll::Ready(Ok(result)) => std::task::Poll::Ready(Ok(result)),
-                std::task::Poll::Ready(Err(_)) => std::task::Poll::Ready(Err(anyhow::anyhow!("query channel closed"))),
-                std::task::Poll::Pending => std::task::Poll::Pending,
-            },
+        match self.rx.as_mut().map(|rx| rx.try_recv()) {
+            Some(Ok(result)) => std::task::Poll::Ready(Ok(result)),
+            Some(Err(oneshot::error::TryRecvError::Empty)) => std::task::Poll::Pending,
+            Some(Err(_)) => std::task::Poll::Ready(Err(anyhow::anyhow!("query channel closed"))),
             None => std::task::Poll::Ready(Err(anyhow::anyhow!("query task already finished"))),
         }
     }
