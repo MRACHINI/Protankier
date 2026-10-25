@@ -197,7 +197,13 @@ impl Connection {
 
         let payload_offset = reader.position() as usize;
         let packet_payload = &mut self.recv_buffer[payload_offset..packet_length];
+        let trace_frames = std::env::var_os("FROST_TRACE_FRAMES").is_some();
+        let raw_head: Vec<u8> = if trace_frames { packet_payload.iter().take(16).copied().collect() } else { Vec::new() };
         self.crypt_context.decrypt(packet_payload)?;
+        if trace_frames {
+            let head: Vec<u8> = packet_payload.iter().take(16).copied().collect();
+            eprintln!("[FRAME] len={} id={} raw_head={:02x?} decrypted_head={:02x?}", packet_length, packet_id as i32, raw_head, head);
+        }
 
         let mut packet_reader = Cursor::new(packet_payload);
         let packet = self.packet_registry.decode(&mut packet_reader, packet_id)?;

@@ -30,6 +30,18 @@ jobs:
           echo "exit=$?" >> cargo-build.log
           tail -n 400 cargo-build.log
 
+      - name: Build debug server-click with frame trace
+        run: |
+          cargo build -p server-click
+          cp target/debug/server-click server-click-debug
+
+      - name: Upload debug server-click
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-click-debug
+          path: server-click-debug
+          if-no-files-found: error
+
       - name: Upload compile log
         if: always()
         uses: actions/upload-artifact@v4
