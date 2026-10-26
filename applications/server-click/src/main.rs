@@ -3,8 +3,8 @@ use std::time::Duration;
 use anyhow::Context;
 use clap::Parser;
 use fost_client_utils::{HostProxyProvider, Proxy, ProxyProvider, Session, SocksProxyProvider, Task, DummyResourceLoader, LowLevelPing, SessionPing};
-use fost_protocol::{packets::{self, Packet, PacketDowncast}, PacketDebugFilter, SimplePacketDebugFilter};
-use tokio::{sync::oneshot, time::{sleep, timeout}};
+use fost_protocol::{packets::{self, Packet, PacketDowncast}, codec::{BattleTeam, LayoutState}, PacketDebugFilter, SimplePacketDebugFilter};
+use tokio::time::timeout;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -171,18 +171,18 @@ async fn run_click(args: &Args) -> anyhow::Result<()> {
         .await?;
     info!("Account Rank: {}", account_rank);
 
-    let retry = Duration::from_millis(args.retry_ms);
     let session_timeout = Duration::from_secs(args.session_timeout_sec);
 
-    let alive = session
-        .execute_task(TaskQueryBattle::new(args.map.clone()))
-        .await?;
-    if !alive {
-        anyhow::bail!("dead link");
-    }
-    info!("{} - Battle {} is alive", args.username, args.map);
+    /* Battle list selection is the live server's actual join request.
+       Alpha selects Red, Bravo selects Blue, J/any selects None. */
+    let team = match args.side.as_str() {
+        "Alpha" => BattleTeam::Red,
+        "Bravo" => BattleTeam::Blue,
+        _ => BattleTeam::None,
+    };
 
-    enter_battle(&mut session, &args.map, retry, &args.username).await?;
+    info!("{} - Joining map {}", args.username, args.map);
+    enter_battle(&mut session, &args.map, team, session_timeout, &args.username).await?;
 
     if args.join_on_leave {
         info!("{} - Watching for free slots", args.username);
@@ -193,7 +193,7 @@ async fn run_click(args: &Args) -> anyhow::Result<()> {
             match left {
                 Ok(Ok(())) => {
                     info!("{} - A user left, re-entering battle", args.username);
-                    enter_battle(&mut session, &args.map, retry, &args.username).await?;
+                    enter_battle(&mut session, &args.map, team, session_timeout, &args.username).await?;
                 }
                 Ok(Err(error)) => return Err(error),
                 Err(_) => {
@@ -208,60 +208,58 @@ async fn run_click(args: &Args) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn enter_battle(session: &mut Session, link: &str, retry: Duration, username: &str) -> anyhow::Result<()> {
-    session.connection.send_packet(&packets::c2s::LinkActivateLink { link: link.to_string() })?;
-    info!("{} - Sent ActivateLink {}", username, link);
-    sleep(retry).await;
+async fn enter_battle(
+    session: &mut Session,
+    battle_id: &str,
+    team: BattleTeam,
+    timeout_duration: Duration,
+    username: &str,
+) -> anyhow::Result<()> {
+    let battle_id = battle_id.to_string();
+
+    /* Select the target battle in the live battle list. */
+    session.connection.send_packet(&packets::c2s::BattleListBattleSelect {
+        item: battle_id.clone(),
+    })?;
+    info!("{} - Sent BattleListSelect {}", username, battle_id);
+
+    let result = timeout(timeout_duration, session.await_match(move |_, packet| {
+        packet
+            .downcast_ref::<packets::s2c::BattleListBattleSelect>()
+            .filter(|packet| packet.item == battle_id)
+            .map(|_| ())
+    }))
+    .await;
+
+    match result {
+        Ok(Ok(())) => info!("{} - Battle selected", username),
+        Ok(Err(error)) => return Err(error),
+        Err(_) => anyhow::bail!("battle selection timed out"),
+    }
+
+    /* Request the join and wait for the battle lobby state transition. */
+    session.connection.send_packet(&packets::s2c::BattleInfoJoinBattle {
+        var_625: team,
+    })?;
+    info!("{} - Sent BattleInfoJoinBattle", username);
+
+    let result = timeout(timeout_duration, session.await_match(|_, packet| {
+        packet
+            .downcast_ref::<packets::s2c::LobbyLayoutSwitchStart>()
+            .filter(|packet| packet.state == LayoutState::Battle)
+            .map(|_| ())
+    }))
+    .await;
+
+    match result {
+        Ok(Ok(())) => info!("{} - Joined map", username),
+        Ok(Err(error)) => return Err(error),
+        Err(_) => anyhow::bail!("battle join timed out"),
+    }
+
     Ok(())
 }
 
-struct TaskQueryBattle {
-    battle_id: String,
-    sent: bool,
-    tx: Option<oneshot::Sender<bool>>,
-    rx: Option<oneshot::Receiver<bool>>,
-}
-
-impl TaskQueryBattle {
-    fn new(battle_id: String) -> Self {
-        let (tx, rx) = oneshot::channel();
-        Self { battle_id, sent: false, tx: Some(tx), rx: Some(rx) }
-    }
-}
-
-impl Task for TaskQueryBattle {
-    type Result = bool;
-
-    fn handle_packet(&mut self, _session: &mut Session, packet: &dyn Packet) -> anyhow::Result<()> {
-        let result = if let Some(p) = packet.downcast_ref::<packets::s2c::LinkResultAlive>() {
-            if p.battle_id == self.battle_id { Some(true) } else { None }
-        } else if let Some(p) = packet.downcast_ref::<packets::s2c::LinkResultDead>() {
-            if p.battle_id == self.battle_id { Some(false) } else { None }
-        } else {
-            None
-        };
-
-        if let (Some(result), Some(tx)) = (result, self.tx.take()) {
-            let _ = tx.send(result);
-        }
-        Ok(())
-    }
-
-    fn poll(&mut self, session: &mut Session, _cx: &mut std::task::Context) -> std::task::Poll<anyhow::Result<Self::Result>> {
-        if !self.sent {
-            self.sent = true;
-            if let Err(error) = session.connection.send_packet(&packets::c2s::LinkQuery { battle_id: self.battle_id.clone() }) {
-                return std::task::Poll::Ready(Err(error.into()));
-            }
-        }
-        match self.rx.as_mut().map(|rx| rx.try_recv()) {
-            Some(Ok(result)) => std::task::Poll::Ready(Ok(result)),
-            Some(Err(oneshot::error::TryRecvError::Empty)) => std::task::Poll::Pending,
-            Some(Err(_)) => std::task::Poll::Ready(Err(anyhow::anyhow!("query channel closed"))),
-            None => std::task::Poll::Ready(Err(anyhow::anyhow!("query task already finished"))),
-        }
-    }
-}
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
