@@ -67,12 +67,12 @@ enum LoginOutcome {
 struct LoginTask {
     username: String,
     password: String,
-    tx: Option<oneshot::Sender<LoginOutcome>>,
+    outcome: Option<LoginOutcome>,
     sent: bool,
 }
 
 impl Task for LoginTask {
-    type Result = ();
+    type Result = LoginOutcome;
 
     fn handle_packet(&mut self, _session: &mut Session, packet: &dyn Packet) -> anyhow::Result<()> {
         let outcome = if packet.is_type::<packets::s2c::AccountLoginFailure>() {
@@ -87,13 +87,13 @@ impl Task for LoginTask {
             None
         };
 
-        if let (Some(outcome), Some(tx)) = (outcome, self.tx.take()) {
-            let _ = tx.send(outcome);
+        if let Some(outcome) = outcome {
+            self.outcome = Some(outcome);
         }
         Ok(())
     }
 
-    fn poll(&mut self, session: &mut Session, _cx: &mut std::task::Context) -> std::task::Poll<anyhow::Result<()>> {
+    fn poll(&mut self, session: &mut Session, _cx: &mut std::task::Context) -> std::task::Poll<anyhow::Result<LoginOutcome>> {
         if !self.sent {
             self.sent = true;
             if let Err(error) = session.connection.send_packet(&packets::c2s::AccountLoginExecute {
@@ -104,13 +104,16 @@ impl Task for LoginTask {
                 return std::task::Poll::Ready(Err(error.into()));
             }
         }
+
+        if let Some(outcome) = self.outcome.take() {
+            return std::task::Poll::Ready(Ok(outcome));
+        }
         std::task::Poll::Pending
     }
 }
 
 async fn login(session: &mut Session, username: &str, password: &str) -> anyhow::Result<LoginOutcome> {
-    let (tx, _rx) = oneshot::channel();
-    let task = LoginTask { username: username.to_string(), password: password.to_string(), tx: Some(tx), sent: false };
+    let task = LoginTask { username: username.to_string(), password: password.to_string(), outcome: None, sent: false };
     let outcome = session.execute_task(task).await.context("login channel closed")?;
     Ok(outcome)
 }
