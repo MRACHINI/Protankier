@@ -11,13 +11,15 @@ RUN (cargo update -p time@0.3.21 --precise 0.3.36 || true) \
  && cp target/release/server-click /server-click
 
 FROM node:20-bookworm-slim
+ARG APP_VERSION=dev
 RUN apt-get update \
  && apt-get install -y --no-install-recommends libssl3 ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 ENV NODE_ENV=production \
     PORT=3005 \
     DATA_DIR=/data \
-    SERVER_CLICK_BIN=/app/bin/server-click
+    SERVER_CLICK_BIN=/app/bin/server-click \
+    APP_VERSION=${APP_VERSION}
 WORKDIR /app
 COPY package*.json ./
 RUN npm install --omit=dev

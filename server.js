@@ -10,6 +10,7 @@ const PORT = Number(process.env.PORT || 3005);
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
 const CONFIG_PATH = path.join(DATA_DIR, "config.json");
 const BINARY = process.env.SERVER_CLICK_BIN || path.join(__dirname, "bin", "server-click");
+const APP_VERSION = process.env.APP_VERSION || "dev";
 
 const DEFAULT_CONFIG = {
   target: "146.59.110.195:1337",
@@ -144,7 +145,7 @@ const server = http.createServer((req, res) => {
 
   if (req.method === "GET" && url.pathname === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    return res.end(JSON.stringify({ ok: true, running: runningList().length }));
+    return res.end(JSON.stringify({ ok: true, version: APP_VERSION, running: runningList().length }));
   }
 
   if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
@@ -217,5 +218,5 @@ process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`ProTanki clicker UI on http://0.0.0.0:${PORT}`);
+  console.log(`ProTanki clicker UI on http://0.0.0.0:${PORT} (${APP_VERSION})`);
 });
