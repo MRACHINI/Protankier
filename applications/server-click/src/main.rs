@@ -217,6 +217,20 @@ async fn enter_battle(
 ) -> anyhow::Result<()> {
     let battle_id = battle_id.to_string();
 
+    /* Wait for the login/lobby transition to settle before touching the battle list. */
+    let result = timeout(timeout_duration, session.await_match(|_, packet| {
+        packet
+            .downcast_ref::<packets::s2c::LobbyLayoutSwitchEnd>()
+            .map(|_| ())
+    }))
+    .await;
+
+    match result {
+        Ok(Ok(())) => info!("{} - Lobby ready", username),
+        Ok(Err(error)) => return Err(error),
+        Err(_) => anyhow::bail!("lobby ready timed out"),
+    }
+
     /* Select the target battle in the live battle list. */
     session.connection.send_packet(&packets::c2s::BattleListBattleSelect {
         item: battle_id.clone(),
