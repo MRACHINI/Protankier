@@ -171,6 +171,11 @@ async fn run_click(args: &Args) -> anyhow::Result<()> {
         .await?;
     info!("Account Rank: {}", account_rank);
 
+    /* The live client asks the server to prepare the lobby before any battle list use.
+       Packet 1452181070 is juhe1's `LoadLobbyOutPacket` / our `LayoutSwitchServerSelect`. */
+    session.connection.send_packet(&packets::c2s::LayoutSwitchServerSelect {})?;
+    info!("{} - Sent ServerSelect / LoadLobby", args.username);
+
     let session_timeout = Duration::from_secs(args.session_timeout_sec);
 
     /* Battle list selection is the live server's actual join request.
