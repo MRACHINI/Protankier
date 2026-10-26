@@ -14,6 +14,8 @@
   #version { margin-left:auto; font-family: ui-monospace, Consolas, monospace; }
   .pill { font-size:12px; padding:2px 8px; border-radius:10px; background:#333; color:var(--muted); }
   .pill.on { background:rgba(61,220,132,.15); color:var(--ok); }
+  .pill.warn { background:rgba(240,180,60,.15); color:#f0b43c; }
+  .pill.bad { background:rgba(220,80,80,.15); color:var(--bad); }
   main { display:grid; grid-template-columns: 1fr 1fr; gap:16px; padding:16px; }
   @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
   section { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px; }
@@ -83,10 +85,26 @@
     <div id="cfgMsg" class="msg"></div>
   </section>
 
+  <section style="grid-column: 1 / -1;">
+    <h2>Battles</h2>
+    <div class="actions">
+      <button onclick="loadBattles()" id="loadBattlesBtn">Load live battles</button>
+      <label style="margin-left:12px;"><input type="checkbox" id="onlyAllowed"> Only battles my accounts can join</label>
+      <span id="battleMsg" class="msg" style="margin-left:12px;"></span>
+    </div>
+    <div class="hint">Loading the list logs in with an idle account, so it cannot run while all enabled accounts are started.</div>
+    <table id="battleTable" style="display:none;">
+      <thead>
+        <tr><th></th><th>Battle</th><th>Mode</th><th>Ranks</th><th>Players</th><th>Joinable by</th></tr>
+      </thead>
+      <tbody id="battles"></tbody>
+    </table>
+  </section>
+
   <section>
     <h2>Accounts</h2>
     <table>
-      <thead><tr><th>On</th><th>Account</th><th>Battle ID or link</th><th>Side</th><th>Password</th><th></th></tr></thead>
+      <thead><tr><th>On</th><th>Account</th><th>Rank</th><th>State</th><th>Battle ID or link</th><th>Side</th><th>Password</th><th></th></tr></thead>
       <tbody id="accounts"></tbody>
     </table>
     <div class="actions">
@@ -96,6 +114,10 @@
       <button class="primary" onclick="saveConfig()">Save accounts</button>
     </div>
     <div class="hint">Paste a battle link like <code>#/battle/e2e702ee47fa9be8</code> or just the id — both work. Leave a password blank to keep the saved one. Passwords are never shown back.</div>
+    <div class="actions" style="margin-top:8px;">
+      <label><input type="checkbox" id="soundOn"> Sound on events</label>
+      <button onclick="playBeep('joined')">Test sound</button>
+    </div>
     <div id="accMsg" class="msg"></div>
   </section>
 
@@ -107,8 +129,41 @@
 
 <script>
   const $ = (id) => document.getElementById(id);
-  const state = { config: null, running: new Set() };
+  const state = { config: null, running: new Set(), states: {}, battles: [] };
   const socket = io();
+
+  /* ---- audio notifications -------------------------------------------------
+     A short synthesised tone, so no asset files are needed. Browsers block audio
+     until the page has been interacted with, which the Start buttons satisfy. */
+  let audioCtx = null;
+  function beep(freq, durationMs, gainValue) {
+    if (!$("soundOn").checked) return;
+    try {
+      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === "suspended") audioCtx.resume();
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = freq;
+      gain.gain.value = gainValue;
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start();
+      osc.stop(audioCtx.currentTime + durationMs / 1000);
+    } catch (_) {}
+  }
+
+  function playBeep(kind) {
+    if (kind === "joined") { beep(880, 120, 0.12); setTimeout(() => beep(1320, 180, 0.12), 130); }
+    else if (kind === "battle-gone") { beep(330, 300, 0.15); }
+    else if (kind === "stopped") { beep(220, 220, 0.12); }
+    else { beep(660, 100, 0.10); }
+  }
+
+  $("soundOn").addEventListener("change", () => {
+    localStorage.setItem("soundOn", $("soundOn").checked ? "1" : "0");
+    if ($("soundOn").checked) beep(660, 90, 0.08);
+  });
+  $("soundOn").checked = localStorage.getItem("soundOn") === "1";
 
   function setMsg(id, text, kind) {
     const el = $(id);
@@ -133,10 +188,14 @@
     tbody.innerHTML = "";
     accounts.forEach((a, i) => {
       const tr = document.createElement("tr");
-      const running = state.running.has(a.username.toLowerCase());
+      const key = (a.username || "").toLowerCase();
+      const running = state.running.has(key);
+      const st = state.states[key] || {};
       tr.innerHTML = `
         <td><input type="checkbox" data-i="${i}" data-k="enabled" ${a.enabled ? "checked" : ""}></td>
         <td><input data-i="${i}" data-k="username" value="${escapeAttr(a.username)}"></td>
+        <td>${a.rank != null ? a.rank : "?"}</td>
+        <td><span class="pill ${stateClass(st.phase)}">${escapeAttr(stateLabel(st))}</span></td>
         <td><input data-i="${i}" data-k="battleId" value="${escapeAttr(a.battleId)}"></td>
         <td><select data-i="${i}" data-k="side">
           ${["J","Alpha","Bravo"].map((s) => `<option ${s === a.side ? "selected" : ""}>${s}</option>`).join("")}
@@ -159,8 +218,140 @@
     });
   }
 
+  function stateLabel(st) {
+    switch (st.phase) {
+      case "starting": return "starting";
+      case "logging-in": return "logging in";
+      case "rank": return "logged in";
+      case "waiting": return `waiting ${st.detail || ""}`.trim();
+      case "in-battle": return "in battle";
+      case "battle-gone": return "battle gone";
+      case "taken-over": return "in use elsewhere";
+      case "reconnecting": return "reconnecting";
+      case "failed": return `failed: ${st.detail || ""}`.trim();
+      case "stopped": return st.detail ? `stopped (${st.detail})` : "stopped";
+      default: return "idle";
+    }
+  }
+
+  function stateClass(phase) {
+    if (phase === "in-battle") return "on";
+    if (phase === "waiting" || phase === "logging-in" || phase === "starting" || phase === "reconnecting") return "warn";
+    if (phase === "battle-gone" || phase === "failed" || phase === "taken-over") return "bad";
+    return "";
+  }
+
   function escapeAttr(s) {
     return String(s ?? "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+  }
+
+  /* ---- battle browser ----------------------------------------------------- */
+
+  async function loadBattles() {
+    const btn = $("loadBattlesBtn");
+    btn.disabled = true;
+    setMsg("battleMsg", "Loading…", "ok");
+    try {
+      const res = await fetch("/api/battles");
+      const data = await res.json();
+      if (!data.ok) {
+        setMsg("battleMsg", data.error || "could not load battles", "bad");
+        return;
+      }
+      if (data.rank != null) {
+        const via = state.config.accounts.find((a) => a.username.toLowerCase() === data.via.toLowerCase());
+        if (via) via.rank = data.rank;
+        renderAccounts(state.config.accounts);
+      }
+      state.battles = data.battles || [];
+      setMsg("battleMsg", `${state.battles.length} battles (via ${data.via})`, "ok");
+      renderBattles();
+    } catch (error) {
+      setMsg("battleMsg", `failed: ${error.message}`, "bad");
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  /* A battle is joinable by an account when the account's rank is inside minRank..maxRank. */
+  function canJoin(account, battle) {
+    if (account.rank == null) return true; // rank unknown: do not hide anything
+    const min = Number(battle.minRank ?? 0);
+    const max = Number(battle.maxRank ?? 99);
+    return account.rank >= min && account.rank <= max;
+  }
+
+  function joinableAccounts(battle) {
+    return (state.config?.accounts || []).filter((a) => a.enabled && canJoin(a, battle));
+  }
+
+  function renderBattles() {
+    const tbody = $("battles");
+    const table = $("battleTable");
+    tbody.innerHTML = "";
+    const onlyAllowed = $("onlyAllowed").checked;
+
+    const rows = state.battles.filter((b) => !onlyAllowed || joinableAccounts(b).length > 0);
+    table.style.display = rows.length ? "" : "none";
+
+    rows.forEach((b) => {
+      const players = (b.users || []).length;
+      const full = players >= (b.maxPeople || 0);
+      const allowed = joinableAccounts(b);
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td><button class="primary" data-id="${escapeAttr(b.battleId)}" ${
+          full || allowed.length === 0 ? "disabled" : ""
+        }>Use</button></td>
+        <td>${escapeAttr(b.name || "(unnamed)")}<br><code style="opacity:.6">${escapeAttr(b.battleId)}</code></td>
+        <td>${escapeAttr(b.battleMode || "")}</td>
+        <td>${b.minRank ?? "?"}–${b.maxRank ?? "?"}</td>
+        <td>${players}/${b.maxPeople} ${full ? "<b>(full)</b>" : ""}</td>
+        <td>${allowed.map((a) => escapeAttr(a.username)).join(", ") || "—"}</td>`;
+      tbody.appendChild(tr);
+    });
+
+    tbody.querySelectorAll("button[data-id]").forEach((btn) => {
+      btn.addEventListener("click", () => pickBattle(btn.dataset.id));
+    });
+  }
+
+  /* Selecting a battle points every account that may join it at that battle,
+     and only those accounts are left enabled for the next Start. */
+  function pickBattle(battleId) {
+    const battle = state.battles.find((b) => b.battleId === battleId);
+    if (!battle || !state.config) return;
+
+    let allowed = 0;
+    let blocked = 0;
+    for (const account of state.config.accounts) {
+      if (canJoin(account, battle)) {
+        account.battleId = battleId;
+        account.enabled = true;
+        allowed++;
+      } else {
+        account.enabled = false;
+        blocked++;
+      }
+    }
+    renderAccounts(state.config.accounts);
+    setMsg(
+      "accMsg",
+      `"${battle.name}" selected for ${allowed} account(s)` +
+        (blocked ? `, ${blocked} disabled (rank outside ${battle.minRank}–${battle.maxRank})` : ""),
+      "ok"
+    );
+    beep(760, 90, 0.08);
+  }
+
+  /* Resolve a pasted link or id against the last loaded list. */
+  function resolveBattleLink(raw) {
+    const text = String(raw || "").trim();
+    if (!text) return null;
+    const match = text.match(/([0-9a-fA-F]{8,32})/);
+    const id = match ? match[1] : "";
+    if (!id) return null;
+    return state.battles.find((b) => b.battleId.toLowerCase() === id.toLowerCase()) || { battleId: id };
   }
 
   function collectConfig() {
@@ -256,12 +447,24 @@
 
   socket.on("hello", (data) => {
     state.running = new Set(data.running);
+    state.states = data.states || {};
     updateRunCount();
-    data.logs.forEach(appendLog);
+    (data.logs || []).forEach(appendLog);
     if (state.config) renderAccounts(state.config.accounts);
   });
 
   socket.on("log", appendLog);
+
+  socket.on("state", ({ username, phase, detail }) => {
+    state.states[username.toLowerCase()] = { phase, detail };
+    if (state.config) renderAccounts(state.config.accounts);
+
+    /* Audio cues for the states worth interrupting for. */
+    if (phase === "in-battle") playBeep("joined");
+    else if (phase === "battle-gone" || phase === "failed") playBeep("battle-gone");
+    else if (phase === "taken-over") playBeep("battle-gone");
+    else if (phase === "stopped") playBeep("stopped");
+  });
 
   socket.on("status", ({ username, status }) => {
     const key = username.toLowerCase();
@@ -269,6 +472,8 @@
     updateRunCount();
     if (state.config) renderAccounts(state.config.accounts);
   });
+
+  $("onlyAllowed").addEventListener("change", renderBattles);
 
   fetch("/api/config").then((r) => r.json()).then(renderConfig);
   fetch("/health")

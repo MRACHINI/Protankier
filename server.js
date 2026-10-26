@@ -26,6 +26,7 @@ const DEFAULT_CONFIG = {
 const DEFAULT_ACCOUNT = { username: "", password: "", battleId: "", side: "J", enabled: true };
 
 const processes = new Map();
+const accountStates = new Map();
 const logs = [];
 const MAX_LOGS = 500;
 
@@ -118,13 +119,32 @@ function startAccount(account, accountCount, accountIndex) {
 
   const child = spawn(BINARY, args, { stdio: ["ignore", "pipe", "pipe"] });
   processes.set(key, child);
+  accountStates.set(key, { phase: "starting", detail: "", updated: Date.now() });
   io.emit("status", { username: account.username, status: "running" });
+  io.emit("state", { username: account.username, phase: "starting", detail: "" });
   record({ level: "info", username: account.username, message: "started" });
 
   const onData = (buf) => {
     for (const raw of buf.toString().split("\n")) {
       const message = raw.trim();
       if (!message) continue;
+
+      /* The binary reports structured state on its own line, separate from the log text. */
+      if (message.startsWith("STATE ")) {
+        const [phase, detail = ""] = message.slice(6).split("\t");
+        accountStates.set(key, { phase, detail, updated: Date.now() });
+        io.emit("state", { username: account.username, phase, detail });
+        if (phase === "rank") {
+          const previous = config.accounts.find((a) => a.username.toLowerCase() === key);
+          const rank = Number(detail);
+          if (previous && Number.isFinite(rank) && previous.rank !== rank) {
+            previous.rank = rank;
+            saveConfig(config);
+          }
+        }
+        continue;
+      }
+
       record({ level: "log", username: account.username, message: message.replace(account.password, "***") });
     }
   };
@@ -137,11 +157,61 @@ function startAccount(account, accountCount, accountIndex) {
 
   child.on("exit", (code, signal) => {
     processes.delete(key);
+    /* Keep the specific reason the binary reported (battle gone, taken over, failed) rather
+       than flattening every non-zero exit into a generic "stopped". */
+    const previous = accountStates.get(key) || {};
+    const keepReason = previous.phase === "battle-gone" || previous.phase === "failed" || previous.phase === "taken-over";
+    if (!keepReason) {
+      accountStates.set(key, { phase: "stopped", detail: `code=${code}`, updated: Date.now() });
+      io.emit("state", { username: account.username, phase: "stopped", detail: `code=${code}` });
+    }
     io.emit("status", { username: account.username, status: "stopped" });
     record({ level: code === 0 ? "info" : "error", username: account.username, message: `exited code=${code} signal=${signal}` });
   });
 
   return { ok: true };
+}
+
+// Fetches the live battle list by logging in with an idle account.
+function fetchBattles(account) {
+  return new Promise((resolve) => {
+    const args = [
+      "--action", "list",
+      "--username", account.username,
+      "--password", account.password,
+      "--target", config.target,
+      "--language-code", config.language,
+    ];
+    if (config.proxy) args.push("--proxy", config.proxy);
+
+    const child = spawn(BINARY, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    let err = "";
+    const timer = setTimeout(() => {
+      child.kill();
+      resolve({ ok: false, error: "timed out fetching the battle list" });
+    }, 25000);
+
+    child.stdout.on("data", (d) => (out += d.toString()));
+    child.stderr.on("data", (d) => (err += d.toString()));
+
+    child.on("exit", () => {
+      clearTimeout(timer);
+      const rankLine = out.split("\n").find((l) => l.startsWith("RANK\t"));
+      const battlesLine = out.split("\n").find((l) => l.startsWith("BATTLES\t"));
+      if (!battlesLine) {
+        const cleaned = err.replace(account.password, "***").split("\n").filter(Boolean).slice(-3).join(" ");
+        return resolve({ ok: false, error: cleaned || "no battle list returned" });
+      }
+      try {
+        const payload = JSON.parse(battlesLine.slice(8));
+        const rank = rankLine ? Number(rankLine.slice(5)) : null;
+        resolve({ ok: true, rank, battles: payload.battles || [] });
+      } catch (error) {
+        resolve({ ok: false, error: `could not parse battle list: ${error.message}` });
+      }
+    });
+  });
 }
 
 function stopAccount(username) {
@@ -169,6 +239,36 @@ const server = http.createServer((req, res) => {
   if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     return res.end(readFileSync(UI_PATH));
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/battles") {
+    /* Listing logs in, so never use an account that is currently clicker-active: that would
+       evict its own session. Prefer an idle enabled account. */
+    const idle = config.accounts.find(
+      (a) => a.enabled && a.username && !processes.has(a.username.toLowerCase())
+    );
+    if (!idle) {
+      res.writeHead(409, { "Content-Type": "application/json" });
+      return res.end(
+        JSON.stringify({
+          ok: false,
+          error: "all enabled accounts are running; stop one to browse battles",
+        })
+      );
+    }
+
+    fetchBattles(idle).then((result) => {
+      if (result.ok && result.rank != null) {
+        const stored = config.accounts.find((a) => a.username.toLowerCase() === idle.username.toLowerCase());
+        if (stored && stored.rank !== result.rank) {
+          stored.rank = result.rank;
+          saveConfig(config);
+        }
+      }
+      res.writeHead(result.ok ? 200 : 502, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ...result, via: idle.username }));
+    });
+    return;
   }
 
   if (req.method === "GET" && url.pathname === "/api/config") {
@@ -208,7 +308,11 @@ const io = new Server(server, {
 });
 
 io.on("connection", (socket) => {
-  socket.emit("hello", { running: runningList(), logs: logs.slice(-200) });
+  socket.emit("hello", {
+    running: runningList(),
+    logs: logs.slice(-200),
+    states: Object.fromEntries(accountStates),
+  });
 
   socket.on("start", (username, ack) => {
     const account = config.accounts.find((a) => a.username.toLowerCase() === String(username).toLowerCase());

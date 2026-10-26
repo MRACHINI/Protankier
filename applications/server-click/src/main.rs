@@ -67,6 +67,15 @@ struct Args {
     session_timeout_sec: u64,
 }
 
+/// Emits a machine-readable state line for the UI, separate from the human log.
+///
+/// The UI server parses lines starting with `STATE ` and turns them into socket events,
+/// so per-account state does not depend on scraping log text.
+fn report(phase: &str, detail: &str) {
+    let detail = detail.replace('"', "'");
+    println!("STATE {}\t{}", phase, detail);
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LoginOutcome {
     Success,
@@ -80,6 +89,7 @@ enum SessionError {
     WrongCredentials,
     Banned,
     InvalidBattleLink,
+    BattleGone { battle_id: String },
     BattleNotListed { battle_id: String, online: usize },
 }
 
@@ -91,6 +101,11 @@ impl std::fmt::Display for SessionError {
             SessionError::InvalidBattleLink => write!(
                 f,
                 "no battle id found in the link; paste something like https://protanki.online/#/battle/<id>"
+            ),
+            SessionError::BattleGone { battle_id } => write!(
+                f,
+                "battle {} is gone from the server (it ended or was closed)",
+                battle_id
             ),
             SessionError::BattleNotListed { battle_id, online } => write!(
                 f,
@@ -296,8 +311,14 @@ async fn run_click(args: &Args) -> anyhow::Result<()> {
     loop {
         match run_session(args).await {
             Ok(()) => return Ok(()),
-            Err(error) if is_permanent(&error) => return Err(error),
-            Err(error) if !args.join_on_leave => return Err(error),
+            Err(error) if is_permanent(&error) => {
+                report("failed", &error.to_string());
+                return Err(error);
+            }
+            Err(error) if !args.join_on_leave => {
+                report("failed", &error.to_string());
+                return Err(error);
+            }
             Err(error) => {
                 attempt += 1;
 
@@ -306,11 +327,14 @@ async fn run_click(args: &Args) -> anyhow::Result<()> {
                 if is_takeover(&error) {
                     takeovers += 1;
                     if takeovers > 3 {
-                        anyhow::bail!(
+                        let message = format!(
                             "account is in use elsewhere (logged in another client {} times); stopping so we stop kicking it",
                             takeovers
                         );
+                        report("taken-over", &message);
+                        anyhow::bail!(message);
                     }
+                    report("taken-over", &format!("{} time(s)", takeovers));
                 } else {
                     takeovers = 0;
                 }
@@ -322,6 +346,7 @@ async fn run_click(args: &Args) -> anyhow::Result<()> {
                     error,
                     delay.as_secs()
                 );
+                report("reconnecting", &error.to_string());
                 tokio::time::sleep(delay).await;
             }
         }
@@ -334,6 +359,7 @@ fn is_permanent(error: &anyhow::Error) -> bool {
         Some(SessionError::WrongCredentials) | Some(SessionError::Banned) => true,
         Some(SessionError::BattleNotListed { .. }) => true,
         Some(SessionError::InvalidBattleLink) => true,
+        Some(SessionError::BattleGone { .. }) => true,
         _ => false,
     }
 }
@@ -346,6 +372,7 @@ async fn run_session(args: &Args) -> anyhow::Result<()> {
 
     session.await_server_resources_loaded().await?;
     info!("{} - Viewing login screen", args.username);
+    report("logging-in", "");
 
     match login(&mut session, &args.username, &args.password).await? {
         LoginOutcome::Success => info!("{} - Logged in", args.username),
@@ -359,6 +386,7 @@ async fn run_session(args: &Args) -> anyhow::Result<()> {
         })
         .await?;
     info!("Account Rank: {}", account_rank);
+    report("rank", &account_rank.to_string());
 
     let session_timeout = Duration::from_secs(args.session_timeout_sec);
     let team = team_for_side(&args.side);
@@ -544,15 +572,20 @@ async fn enter_battle(
        attempt itself did not already consume. Otherwise every account retries at half rate. */
     let attempt_timeout = Duration::from_millis(300);
     let mut first_retry = true;
+    let mut attempts: u64 = 0;
     loop {
         let cycle_start = std::time::Instant::now();
+        attempts += 1;
 
         let attempt_start = std::time::Instant::now();
         let outcome = try_join(session, &battle_id, team, attempt_timeout, username).await;
         let attempt_took = attempt_start.elapsed();
 
         match outcome {
-            Ok(JoinAttempt::Joined) => return Ok(()),
+            Ok(JoinAttempt::Joined) => {
+                report("in-battle", &battle_id);
+                return Ok(());
+            }
             Ok(JoinAttempt::Full) if keep_trying => {
                 /* Keep each account on its own phase: the first wait carries this account's
                    stagger offset so parallel accounts never fire together. */
@@ -569,7 +602,24 @@ async fn enter_battle(
                     attempt_took.as_millis(),
                     remaining.as_millis()
                 );
-                wait_for_slot(session, &battle_id, remaining).await?;
+                report(
+                    "waiting",
+                    &format!("attempt={} next={}ms", attempts, remaining.as_millis()),
+                );
+
+                match wait_for_slot(session, &battle_id, remaining).await? {
+                    SlotWait::Timeout => {}
+                    SlotWait::SomeoneLeft => {
+                        info!("{} - A slot opened, trying again now", username);
+                    }
+                    SlotWait::BattleGone => {
+                        report("battle-gone", &battle_id);
+                        return Err(SessionError::BattleGone {
+                            battle_id: battle_id.clone(),
+                        }
+                        .into());
+                    }
+                }
             }
             Ok(JoinAttempt::Full) => anyhow::bail!("match is full"),
             Err(error) => return Err(error),
@@ -577,30 +627,47 @@ async fn enter_battle(
     }
 }
 
-/// Blocks until somebody leaves the battle, or the timeout expires.
+/// Why the wait for a free slot finished.
+enum SlotWait {
+    /// Nothing happened; probe again anyway.
+    Timeout,
+    /// Somebody left this battle, so a slot may be free.
+    SomeoneLeft,
+    /// The battle disappeared from the server, so waiting is pointless.
+    BattleGone,
+}
+
+/// Waits for a slot to free up, or for the battle to disappear.
 async fn wait_for_slot(
     session: &mut Session,
     battle_id: &str,
     limit: Duration,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<SlotWait> {
     let battle_id = battle_id.to_string();
 
     let result = timeout(limit, session.await_match(move |_, packet| {
-        /* Any membership change is worth reacting to: a departure frees a slot.
-           Names are generated as {Model}{Packet} from packets.yml. */
+        /* The battle was removed from the server list: it ended or was closed, so waiting
+           for a slot would spin forever against a battle that no longer exists. */
+        if let Some(p) = packet.downcast_ref::<packets::s2c::BattleListBattleRemove>() {
+            if p.battle_id == battle_id {
+                return Some(SlotWait::BattleGone);
+            }
+        }
+
+        /* A membership change: a departure frees a slot. */
         if let Some(p) = packet.downcast_ref::<packets::s2c::BattleInfoRemoveUser>() {
             if p.battle_id == battle_id {
-                return Some(());
+                return Some(SlotWait::SomeoneLeft);
             }
         }
         if let Some(p) = packet.downcast_ref::<packets::s2c::BattleUserListUnknown504016996>() {
             if p.battle_id == battle_id {
-                return Some(());
+                return Some(SlotWait::SomeoneLeft);
             }
         }
         if let Some(p) = packet.downcast_ref::<packets::s2c::BattleUserListUserJoinBattleWithTeam>() {
             if p.battle_id == battle_id {
-                return Some(());
+                return Some(SlotWait::SomeoneLeft);
             }
         }
         None
@@ -608,10 +675,10 @@ async fn wait_for_slot(
     .await;
 
     match result {
-        Ok(Ok(())) => Ok(()),
+        Ok(Ok(reason)) => Ok(reason),
         Ok(Err(error)) => Err(error),
         /* No event arrived: probe anyway in case we missed one. */
-        Err(_) => Ok(()),
+        Err(_) => Ok(SlotWait::Timeout),
     }
 }
 
@@ -673,6 +740,53 @@ async fn try_join(
 }
 
 
+/// `--action list`: log in, dump the server's battle list as JSON, exit.
+/// Powers the battle picker and the battle resolver in the UI.
+async fn run_list(args: &Args) -> anyhow::Result<()> {
+    let (mut session, battle_list) = connect(args).await?;
+    session.await_server_resources_loaded().await?;
+
+    match login(&mut session, &args.username, &args.password).await? {
+        LoginOutcome::Success => {}
+        LoginOutcome::Failure => return Err(SessionError::WrongCredentials.into()),
+        LoginOutcome::Banned => return Err(SessionError::Banned.into()),
+    }
+
+    let rank = session
+        .await_match(|_, packet| {
+            packet
+                .downcast_ref::<packets::s2c::AccountInfoProperties>()
+                .map(|p| p.user_property_cc.rank as u32)
+        })
+        .await?;
+
+    /* Ask for the battle-select lobby, exactly like the join path does, then wait for the list. */
+    session.connection.send_packet(&packets::c2s::LayoutSwitchServerSelect {})?;
+
+    let mut list_json = battle_list.take();
+    if list_json.is_none() {
+        let result = timeout(Duration::from_secs(args.session_timeout_sec), session.await_match(|_, packet| {
+            packet
+                .downcast_ref::<packets::s2c::BattleListListCreate>()
+                .map(|packet| packet.json.clone())
+        }))
+        .await;
+
+        match result {
+            Ok(Ok(json)) => list_json = Some(json),
+            Ok(Err(error)) => return Err(error),
+            Err(_) => anyhow::bail!("battle list not received"),
+        }
+    }
+
+    let json = list_json.unwrap_or_else(|| "{\"battles\":[]}".to_string());
+    /* Machine-readable output; the UI server captures these two lines. */
+    println!("RANK\t{}", rank);
+    println!("BATTLES\t{}", json);
+    Ok(())
+}
+
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -682,6 +796,7 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     match args.action.as_str() {
         "click" => run_click(&args).await,
+        "list" => run_list(&args).await,
         other => anyhow::bail!("unsupported action: {}", other),
     }
 }
