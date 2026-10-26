@@ -2,32 +2,100 @@
 
 Ideas worth checking later. Nothing here is implemented unless it says so.
 
-Last updated after `v2.0.14`.
+Last updated after `v2.0.17`.
+
+## UI requests from the user
+
+### 0. Battle filter box that survives a refresh
+
+Add a text filter above the battle picker. Typing narrows the list by battle name / id /
+map. The important part: **the filter text must persist across a page refresh** (save it in
+`localStorage` and restore it on load), so a reload does not wipe what the user was
+searching for. Same for the rank filter if it is a text field rather than a fixed dropdown.
+
+Not implemented yet.
 
 ## Open questions
 
-### 1. Unexplained ~72s disconnect (highest priority)
+### 1. Unexplained disconnects (highest priority) — investigation in progress
 
-Every session observed on the live server ended with a clean server disconnect roughly
-72–76 seconds after connecting, regardless of activity:
+Originally described as "a clean disconnect every ~72s". Measured lifetimes since then are
+much more variable than that, so the fixed-timer theory is dead:
 
 ```
-13:05:19 connected -> 13:05:48 joined -> 13:06:31 disconnect   (72s)
-23.4s   connected -> 24.0s   joined   -> 99.2s   disconnect     (76s)
+76.6s  80.2s  87.4s  71.6s  51.2s  37.4s  30.4s(evicted)  15.4s  13.2s  11.1s
+405.2s  300s+ (survived)   0.6s
 ```
 
-The reconnect loop hides it, but it means we re-login every ~72s while sitting in a
-battle. That is churn on the game server and may itself provoke the takeover fights.
-Cause unknown.
+**Ruled out by measurement (v2.0.17, full `--log-protocol` traces):**
 
-Prime suspect: the real client answers a periodic anti-cheat ping (`TimeChecker` model,
-`TimeCheckerPongOutPacket`) which we never send. Other candidates are the session sync
-(`ServerSessionSync` / `ServerSessionSyncResponse`) or a kick-for-inactivity timer.
+- **Idle timeout.** No. Traffic is continuous while sitting in a battle, and the close
+  happens 0.1–0.2s after a normal packet, right after a `ServerSessionSync` we answered.
+- **Keepalive not being answered.** No. `PingMeasurePing` arrives every ~1s and our
+  `PingMeasurePong` goes back in 0–1ms (measured over 150 pings: min 0, p50 0, p95 0,
+  max 1ms). `ServerSessionSync` arrives every ~2s and is answered every time.
+  `LowLevelPing` and `SessionPing` are both registered in `connect()`.
+- **The old `TimeChecker` anti-cheat suspect.** No. That model does not exist in this
+  protocol table at all; it was from the older reference client.
+- **Battle-specific.** No. Drops also happen before ever reaching a battle.
+- **Fixed server-side session lifetime.** No. Variance is 0.6s to 405s.
 
-**Next step (owner: user).** Play the real game client and note whether it also
-disconnects about every ~75 seconds. If the real client stays connected, the cause is a
-packet we are not sending. If it also drops, it is normal server behaviour and only our
-reconnect timing needs tuning.
+**Superseded: the "rate/cooldown" reading.** An earlier pass read the variance as the
+server punishing rapid re-logins:
+
+```
+after 240s of no connections : 405.2s
+after ~10s gap               : 11.1s
+back-to-back test runs       : 0.6s, 13.2s, 15.4s
+```
+
+That correlation is most likely coincidental. Under the decode-failure explanation the
+lifetime is simply how long until a specific packet happens to arrive, and a battle with
+more players produces those packets sooner. Do not build a cooldown on this until the
+packet theory is confirmed by the capture described below.
+
+**Both disconnect kinds occur:** `ConnectionClosed(Disconnected)` (clean EOF) and
+`IOError(UnexpectedEof)`. Both sides of a takeover see the *same*
+`ConnectionClosed(Disconnected)`, so the error type cannot distinguish eviction from a
+server drop — this is why the app now never reconnects on its own.
+
+**`IOError(UnexpectedEof)` is NOT a network drop (corrected).** Socket read and write
+errors are mapped to `ConnectionClosed(ReadError)` / `ConnectionClosed(WriteError)` in
+`protocol/src/connection.rs` (lines 268 and 282), so a real socket failure never produces
+`ProtocolError::IOError`. The only remaining source of `IOError(Eof)` is our *own decoder*
+running out of bytes inside a frame, i.e.:
+
+```
+packet frame arrives (correct length, correct id)
+  -> packet_registry.decode(...)
+  -> some codec_struct! field decode hits read_exact past the end
+  -> io::Error(UnexpectedEof) -> ProtocolError::IOError
+  -> try_parse_read_buffer returns Err
+  -> connection treated as dead -> whole session ends
+```
+
+So every "abrupt drop" is really **a packet we failed to decode**, not the server closing
+us. That also explains the wild variance (0.6s to 405s): it depends on which packets the
+server happens to send, not on elapsed time or on how recently we logged in. A battle full
+of activity is far more likely to deliver the offending packet early.
+
+Most likely writer of such a packet: one of the ~30 optionality/width mismatches still
+listed in section 4 below. Any packet we mis-layout kills the session the first time it
+arrives.
+
+**Two consequences.**
+
+1. A single undecodable packet must not be fatal. The frame length is known from the
+   header, so the bad frame can be skipped, logged with its id and byte count, and the
+   session continued. Framing errors (bad header, oversize) stay fatal.
+2. The offending packet id is directly observable. `FROST_TRACE_FRAMES=1` prints
+   `[FRAME] len=... id=...` *before* decoding, so the frame immediately before the error
+   names the culprit.
+
+**Next experiment (designed, not yet run):** measure lifetime as a function of the gap
+since the previous login (gaps of 2s, 10s, 30s, 60s, 120s, 300s, 3 samples each). If
+lifetime rises monotonically with the gap, the cause is confirmed and the fix is a minimum
+cooldown between logins rather than anything in the packet layer.
 
 ### 2. Duplicate-session detection
 

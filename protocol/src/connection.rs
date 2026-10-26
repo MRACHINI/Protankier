@@ -174,75 +174,139 @@ impl Connection {
         self.send_buffer.is_empty()
     }
 
-    fn try_parse_read_buffer(&mut self) -> Poll<ProtocolResult<Box<dyn Packet>>> {
-        if self.recv_buffer_index < 8 {
-            return Poll::Pending
-        }
-
-        let mut reader = Cursor::new(&self.recv_buffer[0..self.recv_buffer_index]);
-        let header = reader.read_u32::<BigEndian>()?;
-        let packet_id = reader.read_u32::<BigEndian>()?;
-
-        // The first byte carries flags (0x40 = raw-deflate compressed); only the
-        // lower 24 bits are the packet length, including the 8-byte header.
-        let packet_is_compressed = header & 0x4000_0000 != 0;
-        let packet_length = (header & 0x00FF_FFFF) as usize;
-
-        if packet_length > 1024 * 1024 * 64 {
-            return Poll::Ready(Err(ProtocolError::PacketTooLarge(packet_length)));
-        } else if packet_length < 8 {
-            return Poll::Ready(Err(ProtocolError::PacketTooSmall(packet_length)));
-        }
-
-        if self.recv_buffer_index < packet_length {
-            if self.recv_buffer.len() < packet_length {
-                self.recv_buffer.resize(packet_length, 0);
-            }
-
-            return Poll::Pending;
-        }
-
-        let payload_offset = reader.position() as usize;
-        let packet_payload = &mut self.recv_buffer[payload_offset..packet_length];
-        let trace_frames = std::env::var_os("FROST_TRACE_FRAMES").is_some();
-        let raw_head: Vec<u8> = if trace_frames { packet_payload.iter().take(16).copied().collect() } else { Vec::new() };
-        self.crypt_context.decrypt(packet_payload)?;
-
-        let decompressed_payload: Vec<u8> = if packet_is_compressed {
-            let mut decoder = DeflateDecoder::new(&packet_payload[..]);
-            let mut decompressed = Vec::with_capacity(packet_payload.len() * 4);
-            decoder.read_to_end(&mut decompressed)?;
-            if decompressed.len() > 1024 * 1024 * 64 {
-                return Poll::Ready(Err(ProtocolError::PacketTooLarge(decompressed.len())));
-            }
-            decompressed
-        } else {
-            packet_payload.to_vec()
-        };
-
-        if trace_frames {
-            let full_hex: String = if std::env::var_os("FROST_TRACE_FULL").is_some() && decompressed_payload.len() <= 512 {
-                decompressed_payload.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ")
-            } else {
-                String::new()
-            };
-            eprintln!("[FRAME] len={} id={} compressed={} raw_head={:02x?} decrypted_head={:02x?} decompressed_len={} full=[{}]", packet_length, packet_id as i32, packet_is_compressed, raw_head, &decompressed_payload[..decompressed_payload.len().min(16)], decompressed_payload.len(), full_hex);
-        }
-
-        let mut packet_reader = Cursor::new(&decompressed_payload[..]);
-        let packet = self.packet_registry.decode(&mut packet_reader, packet_id)?;
-
-        if !packet_reader.position() < packet_reader.get_ref().len() as u64 {
-            warn!("Packet decoder did not read whole packet of id {} ({} out of {} bytes left).", packet_id as i32, packet_reader.get_ref().len() as u64 - packet_reader.position(), decompressed_payload.len());
-        }
-
-        if self.log_filter.should_log(false, Box::as_ref(&packet)) {
-            trace!("[IN ] {: >11} {: >2} {:?} ({} bytes)", packet.packet_id() as i32, packet.model_id(), packet, decompressed_payload.len());
-        }
-
+    /// Drops the first `packet_length` bytes, which must already be known to be cached.
+    fn consume_frame(&mut self, packet_length: usize) {
         self.recv_buffer.copy_within(packet_length.., 0);
         self.recv_buffer_index -= packet_length;
-        return Poll::Ready(Ok(packet));
+    }
+
+    fn try_parse_read_buffer(&mut self) -> Poll<ProtocolResult<Box<dyn Packet>>> {
+        /* Each iteration consumes exactly one whole frame, so a frame we throw away still
+           makes progress: the loop always terminates. */
+        loop {
+            if self.recv_buffer_index < 8 {
+                return Poll::Pending
+            }
+
+            /* The header is the only thing we cannot recover from. Once its length field has
+               been read and sanity-checked, the frame boundary is known exactly, so a payload
+               we fail to decode can be dropped without losing the stream. */
+            let mut reader = Cursor::new(&self.recv_buffer[0..self.recv_buffer_index]);
+            let header = reader.read_u32::<BigEndian>()?;
+            let packet_id = reader.read_u32::<BigEndian>()?;
+
+            // The first byte carries flags (0x40 = raw-deflate compressed); only the
+            // lower 24 bits are the packet length, including the 8-byte header.
+            let packet_is_compressed = header & 0x4000_0000 != 0;
+            let packet_length = (header & 0x00FF_FFFF) as usize;
+
+            if packet_length > 1024 * 1024 * 64 {
+                return Poll::Ready(Err(ProtocolError::PacketTooLarge(packet_length)));
+            } else if packet_length < 8 {
+                return Poll::Ready(Err(ProtocolError::PacketTooSmall(packet_length)));
+            }
+
+            if self.recv_buffer_index < packet_length {
+                if self.recv_buffer.len() < packet_length {
+                    self.recv_buffer.resize(packet_length, 0);
+                }
+
+                return Poll::Pending;
+            }
+
+            let payload_offset = reader.position() as usize;
+            let payload_range = payload_offset..packet_length;
+            let trace_frames = std::env::var_os("FROST_TRACE_FRAMES").is_some();
+            let raw_head: Vec<u8> = if trace_frames {
+                self.recv_buffer[payload_range.clone()].iter().take(16).copied().collect()
+            } else {
+                Vec::new()
+            };
+
+            /* Decryption, decompression and decoding can each fail on one bad frame. The
+               server drops us otherwise: a session must not end just because a single packet
+               does not match our codec table. The frame boundary is already known, so every
+               failure below skips exactly one frame and keeps the stream in sync. */
+
+            /* The cipher owns stream state, so a frame must be decrypted even if it is then
+               discarded; `recv_buffer` and `crypt_context` are disjoint fields. */
+            let decrypt_result = {
+                let payload = &mut self.recv_buffer[payload_range.clone()];
+                self.crypt_context.decrypt(payload)
+            };
+            if let Err(error) = decrypt_result {
+                warn!(
+                    "Skipped packet id {} ({} bytes) that failed to decrypt: {}",
+                    packet_id as i32, packet_length, error
+                );
+                self.consume_frame(packet_length);
+                continue;
+            }
+
+            let decompressed_payload: Vec<u8> = if packet_is_compressed {
+                let payload = &self.recv_buffer[payload_range.clone()];
+                let mut decoder = DeflateDecoder::new(payload);
+                let mut decompressed = Vec::with_capacity(payload.len() * 4);
+                match decoder.read_to_end(&mut decompressed) {
+                    Ok(_) => decompressed,
+                    Err(error) => {
+                        warn!(
+                            "Skipped packet id {} ({} bytes) that failed to decompress: {}",
+                            packet_id as i32, packet_length, error
+                        );
+                        self.consume_frame(packet_length);
+                        continue;
+                    }
+                }
+            } else {
+                self.recv_buffer[payload_range.clone()].to_vec()
+            };
+
+            let mut packet_reader = Cursor::new(&decompressed_payload[..]);
+            let packet = match self.packet_registry.decode(&mut packet_reader, packet_id) {
+                Ok(packet) => packet,
+                Err(error) => {
+                    /* Framing is intact, so skip this frame only. Logging the id makes the
+                       broken codec directly identifiable. */
+                    warn!(
+                        "Skipped undecodable packet id {} ({} bytes): {}",
+                        packet_id as i32, packet_length, error
+                    );
+                    self.consume_frame(packet_length);
+                    continue;
+                }
+            };
+            let consumed = packet_reader.position();
+
+            if trace_frames {
+                let full_hex: String = if std::env::var_os("FROST_TRACE_FULL").is_some() && decompressed_payload.len() <= 512 {
+                    decompressed_payload.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ")
+                } else {
+                    String::new()
+                };
+                eprintln!("[FRAME] len={} id={} compressed={} raw_head={:02x?} decrypted_head={:02x?} decompressed_len={} full=[{}]", packet_length, packet_id as i32, packet_is_compressed, raw_head, &decompressed_payload[..decompressed_payload.len().min(16)], decompressed_payload.len(), full_hex);
+            }
+
+            /* Leftover bytes mean the packet decoded but our layout is missing a field. That
+               is the silent predecessor of a hard decode failure, so report it: it points at
+               the codec that needs fixing. */
+            if consumed < decompressed_payload.len() as u64 {
+                warn!(
+                    "Packet id {} decoded {} of {} bytes ({} bytes left over; codec layout may be out of date).",
+                    packet_id as i32,
+                    consumed,
+                    decompressed_payload.len(),
+                    decompressed_payload.len() as u64 - consumed
+                );
+            }
+
+            if self.log_filter.should_log(false, Box::as_ref(&packet)) {
+                trace!("[IN ] {: >11} {: >2} {:?} ({} bytes)", packet.packet_id() as i32, packet.model_id(), packet, decompressed_payload.len());
+            }
+
+            self.consume_frame(packet_length);
+            return Poll::Ready(Ok(packet));
+        }
     }
 
     fn poll_incoming(&mut self, cx: &mut Context) -> Poll<ConnectionStreamItem> {

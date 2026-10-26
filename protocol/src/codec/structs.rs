@@ -76,7 +76,7 @@ codec_struct!(WeeklyQuestDescription {
 });
 
 codec_struct!(UserStatus {
-    chat_moderator_level: ChatModeratorLevel
+    chat_moderator_level: Option<ChatModeratorLevel>
     ip: String
     rank_index: i32
     uid: String
@@ -116,7 +116,7 @@ codec_struct!(UserPropertyCC {
 });
 
 codec_struct!(UserInfo {
-    chat_moderator_level: ChatModeratorLevel
+    chat_moderator_level: Option<ChatModeratorLevel>
     deaths: i16
     kills: i16
     rank: u8
@@ -125,7 +125,7 @@ codec_struct!(UserInfo {
 });
 
 codec_struct!(UserContainerCC {
-    users: Option<Vec<String>>
+    users: Vec<String>
 });
 
 codec_struct!(TipItemCC {
@@ -139,15 +139,15 @@ codec_struct!(TargetTankDamage {
 });
 
 codec_struct!(TargetPosition {
-    name_22: Option<Vector3<f32>>
-    orientation: Option<Vector3<f32>>
-    position: Option<Vector3<f32>>
+    name_22: Vector3<f32>
+    orientation: Vector3<f32>
+    position: Vector3<f32>
     turret_angle: f32
 });
 
 codec_struct!(TargetHit {
-    direction: Option<Vector3<f32>>
-    name_22: Option<Vector3<f32>>
+    direction: Vector3<f32>
+    name_22: Vector3<f32>
     method_1131: i8
 });
 
@@ -164,7 +164,7 @@ codec_struct!(StatisticsTeamCC {
 });
 
 codec_struct!(StatisticsModelCC {
-    battle_mode: BattleMode
+    battle_mode: Option<BattleMode>
     equipment_constraints_mode: EquipmentConstraintsMode
     fund: i32
     method_1309: BattleLimits
@@ -173,7 +173,7 @@ codec_struct!(StatisticsModelCC {
     parkour_mode: bool
     method_2682: i32
     spectator: bool
-    method_2378: Option<Vec<String>>
+    method_2378: Vec<String>
     name_5: i32
 });
 
@@ -246,11 +246,11 @@ codec_struct!(NewsItemCC {
 });
 
 codec_struct!(MoveCommand {
-    angular_velocity: Option<Vector3<f32>>
+    angular_velocity: Vector3<f32>
     control: i8
-    velocity: Option<Vector3<f32>>
-    orientation: Option<Vector3<f32>>
-    position: Option<Vector3<f32>>
+    velocity: Vector3<f32>
+    orientation: Vector3<f32>
+    position: Vector3<f32>
 });
 
 codec_struct!(LocaleStruct {
@@ -264,8 +264,8 @@ codec_struct!(ImagePair {
 });
 
 codec_struct!(GarageItemInfo {
-    category: ItemCategory
-    item_view_category: ItemViewCategory
+    category: Option<ItemCategory>
+    item_view_category: Option<ItemViewCategory>
     modification_index: i32
     mounted: bool
     name: String
@@ -330,30 +330,30 @@ codec_struct!(ControlPointsCC {
 codec_struct!(ClientPointData {
     id: i32
     name: String
-    position: Option<Vector3<f32>>
+    position: Vector3<f32>
     score: f32
     method_2190: f32
     state: ControlPointState
-    method_2697: Option<Vec<String>>
+    method_2697: Vec<String>
 });
 
 codec_struct!(ClientFlag {
-    method_1384: Option<Vector3<f32>>
+    method_1384: Vector3<f32>
     method_1275: String
-    name_81: Option<Vector3<f32>>
+    name_81: Vector3<f32>
 });
 
 codec_struct!(ClientAssaultFlag {
-    method_1384: Option<Vector3<f32>>
+    method_1384: Vector3<f32>
     method_1275: String
-    name_81: Option<Vector3<f32>>
+    name_81: Vector3<f32>
     id: i32
 });
 
 codec_struct!(ChatMessage {
-    source_user_status: Option<UserStatus>
+    source_user_status: UserStatus
     system: bool
-    target_user_status: Option<UserStatus>
+    target_user_status: UserStatus
     text: String
     warning: bool
 });
@@ -363,8 +363,8 @@ codec_struct!(ChatCC {
     antiflood_enabled: bool
     buffer_size: i32
     chat_enabled: bool
-    chat_moderator_level: ChatModeratorLevel
-    links_white_list: Option<Vec<String>>
+    chat_moderator_level: Option<ChatModeratorLevel>
+    links_white_list: Vec<String>
     min_char: i32
     min_word: i16
     self_name: String
@@ -437,7 +437,7 @@ codec_struct!(BattleInviteMessage {
     available_slot: bool
     battle_id: String
     map_name: String
-    mode: BattleMode
+    mode: Option<BattleMode>
     no_supplies_battle: bool
     private_battle: bool
 });
@@ -454,7 +454,7 @@ codec_struct!(BattleInfoUser {
 codec_struct!(BattleInfoData {
     battle_id: String
     map_name: String
-    mode: BattleMode
+    mode: Option<BattleMode>
     private_battle: bool
     pro_battle: bool
     range: Range
@@ -500,11 +500,11 @@ codec_struct!(AssaultCC {
 
 codec_struct!(AssaultBase {
     id: i32
-    position: Option<Vector3<f32>>
+    position: Vector3<f32>
 });
 
 codec_struct!(AchievementCC {
-    method_2426: Vec<Achievement>
+    method_2426: Vec<Option<Achievement>>
 });
 
 codec_struct!(UidNotifierData {
