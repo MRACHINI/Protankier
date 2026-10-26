@@ -229,6 +229,7 @@
       case "in-battle": return "in battle";
       case "battle-gone": return "battle gone";
       case "taken-over": return "in use elsewhere";
+      case "paused": return "paused - press Start";
       case "reconnecting": return "reconnecting";
       case "failed": return `failed: ${st.detail || ""}`.trim();
       case "stopped": return st.detail ? `stopped (${st.detail})` : "stopped";
@@ -240,6 +241,7 @@
     if (phase === "in-battle") return "on";
     if (phase === "waiting" || phase === "logging-in" || phase === "starting" || phase === "reconnecting") return "warn";
     if (phase === "battle-gone" || phase === "failed" || phase === "taken-over") return "bad";
+    if (phase === "paused") return "warn";
     return "";
   }
 
@@ -470,7 +472,7 @@
 
     /* Audio cues for the states worth interrupting for. */
     if (phase === "in-battle") playBeep("joined");
-    else if (phase === "battle-gone" || phase === "failed") playBeep("battle-gone");
+    else if (phase === "paused" || phase === "battle-gone" || phase === "failed") playBeep("battle-gone");
     else if (phase === "taken-over") playBeep("battle-gone");
     else if (phase === "stopped") playBeep("stopped");
   });

@@ -296,59 +296,35 @@ async fn connect(args: &Args) -> anyhow::Result<(Session, BattleListCache)> {
     Ok((session, battle_list))
 }
 
-/// How the previous session ended, which decides whether reconnecting is sensible.
-fn is_takeover(error: &anyhow::Error) -> bool {
-    let text = error.to_string().to_lowercase();
-    /* The server closes us with a clean disconnect when the same account logs in
-       elsewhere (for example the player opening the real game client). */
-    text.contains("connectionclosed") || text.contains("remote host closed")
-}
-
+/// Zero-reconnect policy.
+///
+/// The server cannot tell us whether a disconnect was caused by the player logging in
+/// elsewhere or by its own idle/housekeeping drop: both sides of a takeover receive the
+/// same `ConnectionClosed(Disconnected)`, verified by running two clients on one account.
+/// Since a reconnect is what evicts the human, the clicker never reconnects on its own.
+/// Any lost session stops the account and waits for an explicit Start.
 async fn run_click(args: &Args) -> anyhow::Result<()> {
-    let mut attempt = 0u32;
-    let mut takeovers = 0u32;
+    match run_session(args).await {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let text = error.to_string();
 
-    loop {
-        match run_session(args).await {
-            Ok(()) => return Ok(()),
-            Err(error) if is_permanent(&error) => {
-                report("failed", &error.to_string());
+            /* Permanent configuration problems get a "failed" state; anything else that
+               ended the session gets "paused", which is the user's cue to press Start. */
+            if is_permanent(&error) {
+                report("failed", &text);
                 return Err(error);
             }
-            Err(error) if !args.join_on_leave => {
-                report("failed", &error.to_string());
-                return Err(error);
-            }
-            Err(error) => {
-                attempt += 1;
 
-                /* If the account keeps getting taken over, our reconnects are what kicks the
-                   real player back out. Argue with them a few times, then stand down. */
-                if is_takeover(&error) {
-                    takeovers += 1;
-                    if takeovers > 3 {
-                        let message = format!(
-                            "account is in use elsewhere (logged in another client {} times); stopping so we stop kicking it",
-                            takeovers
-                        );
-                        report("taken-over", &message);
-                        anyhow::bail!(message);
-                    }
-                    report("taken-over", &format!("{} time(s)", takeovers));
-                } else {
-                    takeovers = 0;
-                }
-
-                let delay = Duration::from_secs(3).min(Duration::from_millis(500) * attempt);
-                warn!(
-                    "{} - Session ended ({}); reconnecting in {}s",
-                    args.username,
-                    error,
-                    delay.as_secs()
-                );
-                report("reconnecting", &error.to_string());
-                tokio::time::sleep(delay).await;
-            }
+            warn!(
+                "{} - Session ended ({}); not reconnecting, press Start when you are done playing",
+                args.username, error
+            );
+            report(
+                "paused",
+                "session ended - not reconnecting automatically, press Start when ready",
+            );
+            Ok(())
         }
     }
 }
@@ -365,7 +341,7 @@ fn is_permanent(error: &anyhow::Error) -> bool {
 }
 
 /// Runs one full session: connect, log in, join, then keep watching.
-/// A dropped connection just means we start over, which is what a clicker must do.
+/// It never retries on its own; the caller decides what a lost session means.
 async fn run_session(args: &Args) -> anyhow::Result<()> {
     let (mut session, battle_list) = connect(args).await?;
     info!("{} - Connected to {}", args.username, args.target);
