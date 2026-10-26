@@ -65,6 +65,30 @@ enum LoginOutcome {
     Banned,
 }
 
+/// Session failures where reconnecting would only loop forever.
+#[derive(Debug)]
+enum SessionError {
+    WrongCredentials,
+    Banned,
+    BattleNotListed { battle_id: String, online: usize },
+}
+
+impl std::fmt::Display for SessionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SessionError::WrongCredentials => write!(f, "login failed: wrong credentials"),
+            SessionError::Banned => write!(f, "login failed: account banned"),
+            SessionError::BattleNotListed { battle_id, online } => write!(
+                f,
+                "battle {} is not in the server list ({} battles online)",
+                battle_id, online
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SessionError {}
+
 struct LoginTask {
     username: String,
     password: String,
@@ -207,6 +231,40 @@ async fn connect(args: &Args) -> anyhow::Result<(Session, BattleListCache)> {
 }
 
 async fn run_click(args: &Args) -> anyhow::Result<()> {
+    let mut attempt = 0u32;
+    loop {
+        match run_session(args).await {
+            Ok(()) => return Ok(()),
+            Err(error) if is_permanent(&error) => return Err(error),
+            Err(error) if !args.join_on_leave => return Err(error),
+            Err(error) => {
+                /* The server drops battle sessions periodically; reconnect instead of dying. */
+                attempt += 1;
+                let delay = Duration::from_secs(3).min(Duration::from_millis(500) * attempt);
+                warn!(
+                    "{} - Session ended ({}); reconnecting in {}s",
+                    args.username,
+                    error,
+                    delay.as_secs()
+                );
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+}
+
+/// Errors that reconnect attempts cannot fix.
+fn is_permanent(error: &anyhow::Error) -> bool {
+    match error.downcast_ref::<SessionError>() {
+        Some(SessionError::WrongCredentials) | Some(SessionError::Banned) => true,
+        Some(SessionError::BattleNotListed { .. }) => true,
+        _ => false,
+    }
+}
+
+/// Runs one full session: connect, log in, join, then keep watching.
+/// A dropped connection just means we start over, which is what a clicker must do.
+async fn run_session(args: &Args) -> anyhow::Result<()> {
     let (mut session, battle_list) = connect(args).await?;
     info!("{} - Connected to {}", args.username, args.target);
 
@@ -215,8 +273,8 @@ async fn run_click(args: &Args) -> anyhow::Result<()> {
 
     match login(&mut session, &args.username, &args.password).await? {
         LoginOutcome::Success => info!("{} - Logged in", args.username),
-        LoginOutcome::Failure => anyhow::bail!("login failed: wrong credentials"),
-        LoginOutcome::Banned => anyhow::bail!("login failed: account banned"),
+        LoginOutcome::Failure => return Err(SessionError::WrongCredentials.into()),
+        LoginOutcome::Banned => return Err(SessionError::Banned.into()),
     }
 
     let account_rank = session
@@ -226,19 +284,8 @@ async fn run_click(args: &Args) -> anyhow::Result<()> {
         .await?;
     info!("Account Rank: {}", account_rank);
 
-    /* Do not send LayoutSwitchServerSelect here: in the real client that packet is
-       `LoadLobbyOutPacket`, sent only when returning from a battle into the lobby.
-       The server pushes the lobby (and the battle list) on its own after login. */
-
     let session_timeout = Duration::from_secs(args.session_timeout_sec);
-
-    /* Battle list selection is the live server's actual join request.
-       Alpha selects Red, Bravo selects Blue, J/any selects None. */
-    let team = match args.side.as_str() {
-        "Alpha" => BattleTeam::Red,
-        "Bravo" => BattleTeam::Blue,
-        _ => BattleTeam::None,
-    };
+    let team = team_for_side(&args.side);
 
     enter_battle(
         &mut session,
@@ -252,9 +299,7 @@ async fn run_click(args: &Args) -> anyhow::Result<()> {
     .await?;
 
     if args.join_on_leave {
-        /* We only get here once we are actually in the battle. Stay in the session and, if the
-           server drops us out of the battle, start sniping again. */
-        info!("{} - Watching battle for removal", args.username);
+        info!("{} - Watching battle", args.username);
         loop {
             let left = timeout(session_timeout, session.await_match(|_, packet| {
                 packet
@@ -289,6 +334,14 @@ async fn run_click(args: &Args) -> anyhow::Result<()> {
     session.await;
     info!("{} - Client disconnected", args.username);
     Ok(())
+}
+
+fn team_for_side(side: &str) -> BattleTeam {
+    match side {
+        "Alpha" => BattleTeam::Red,
+        "Bravo" => BattleTeam::Blue,
+        _ => BattleTeam::None,
+    }
 }
 
 async fn enter_battle(
@@ -358,24 +411,28 @@ async fn enter_battle(
         /* Snipe only the requested battle. Quietly joining a different one would make the
            clicker look successful while sitting in the wrong match. */
         if !ids.iter().any(|id| *id == battle_id) {
-            anyhow::bail!(
-                "battle {} is not in the server list ({} battles online)",
-                battle_id,
-                ids.len()
-            );
+            return Err(SessionError::BattleNotListed {
+                battle_id: battle_id.clone(),
+                online: ids.len(),
+            }
+            .into());
         }
     }
 
     /* The real client selects a battle once and joins; if the match is full the join simply
        does not produce the Battle layout switch. That is the normal state for a slot sniper:
-       with join-on-leave enabled keep hammering until a slot frees up, otherwise fail once. */
+       with join-on-leave enabled keep trying until a slot frees up, otherwise fail once.
+       A disconnect is fatal here - retrying it would spin at full speed forever. */
     let attempt_timeout = Duration::from_secs(4);
+    let retry_pause = Duration::from_millis(600);
     loop {
         match try_join(session, &battle_id, team, attempt_timeout, username).await {
-            Ok(()) => return Ok(()),
-            Err(error) if keep_trying => {
-                warn!("{} - Join attempt failed: {}; retrying", username, error);
+            Ok(JoinAttempt::Joined) => return Ok(()),
+            Ok(JoinAttempt::Full) if keep_trying => {
+                warn!("{} - Match is full; retrying", username);
+                tokio::time::sleep(retry_pause).await;
             }
+            Ok(JoinAttempt::Full) => anyhow::bail!("match is full"),
             Err(error) => return Err(error),
         }
     }
@@ -397,42 +454,58 @@ fn battle_ids(json: &str) -> Vec<String> {
 }
 
 /// One select + join attempt. An error means "no slot this time", not a fatal failure.
+/// Outcome of one select + join attempt.
+enum JoinAttempt {
+    /// We are in the battle.
+    Joined,
+    /// The match is full right now; worth trying again.
+    Full,
+}
+
 async fn try_join(
     session: &mut Session,
     battle_id: &str,
     team: BattleTeam,
     timeout_duration: Duration,
     username: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<JoinAttempt> {
     session.connection.send_packet(&packets::c2s::BattleListBattleSelect {
         item: battle_id.to_string(),
     })?;
 
     let select_id = battle_id.to_string();
-    timeout(timeout_duration, session.await_match(move |_, packet| {
+    match timeout(timeout_duration, session.await_match(move |_, packet| {
         packet
             .downcast_ref::<packets::s2c::BattleListBattleSelect>()
             .filter(|packet| packet.item == select_id)
             .map(|_| ())
     }))
     .await
-    .map_err(|_| anyhow::anyhow!("battle select not confirmed"))??;
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => return Err(error),
+        Err(_) => return Ok(JoinAttempt::Full),
+    }
 
     session.connection.send_packet(&packets::s2c::BattleInfoJoinBattle {
         var_625: team,
     })?;
 
-    timeout(timeout_duration, session.await_match(|_, packet| {
+    match timeout(timeout_duration, session.await_match(|_, packet| {
         packet
             .downcast_ref::<packets::s2c::LobbyLayoutSwitchStart>()
             .filter(|packet| packet.state == LayoutState::Battle)
             .map(|_| ())
     }))
     .await
-    .map_err(|_| anyhow::anyhow!("match is full"))??;
-
-    info!("{} - Joined map {}", username, battle_id);
-    Ok(())
+    {
+        Ok(Ok(())) => {
+            info!("{} - Joined map {}", username, battle_id);
+            Ok(JoinAttempt::Joined)
+        }
+        Ok(Err(error)) => Err(error),
+        Err(_) => Ok(JoinAttempt::Full),
+    }
 }
 
 
