@@ -85,22 +85,6 @@
     <div id="cfgMsg" class="msg"></div>
   </section>
 
-  <section style="grid-column: 1 / -1;">
-    <h2>Battles</h2>
-    <div class="actions">
-      <button onclick="loadBattles()" id="loadBattlesBtn">Load live battles</button>
-      <label style="margin-left:12px;"><input type="checkbox" id="onlyAllowed"> Only battles my accounts can join</label>
-      <span id="battleMsg" class="msg" style="margin-left:12px;"></span>
-    </div>
-    <div class="hint">Loading the list logs in with an idle account, so it cannot run while all enabled accounts are started.</div>
-    <table id="battleTable" style="display:none;">
-      <thead>
-        <tr><th></th><th>Battle</th><th>Mode</th><th>Ranks</th><th>Players</th><th>Joinable by</th></tr>
-      </thead>
-      <tbody id="battles"></tbody>
-    </table>
-  </section>
-
   <section>
     <h2>Accounts</h2>
     <table>
@@ -119,6 +103,24 @@
       <button onclick="playBeep('joined')">Test sound</button>
     </div>
     <div id="accMsg" class="msg"></div>
+  </section>
+
+  <section>
+    <h2>Battles</h2>
+    <div class="actions">
+      <button onclick="loadBattles()" id="loadBattlesBtn">Load live battles</button>
+      <span id="battleMsg" class="msg" style="margin-left:12px;"></span>
+    </div>
+    <label class="check"><input type="checkbox" id="onlyAllowed"> Only battles my accounts can join</label>
+    <div class="hint">Loading the list logs in with an idle account, so it cannot run while all enabled accounts are started. Clicking Use points the eligible accounts at that battle and saves it.</div>
+    <div id="battleTableWrap" style="display:none; max-height:340px; overflow:auto;">
+      <table id="battleTable">
+        <thead>
+          <tr><th></th><th>Battle</th><th>Mode</th><th>Ranks</th><th>Players</th><th>Joinable by</th></tr>
+        </thead>
+        <tbody id="battles"></tbody>
+      </table>
+    </div>
   </section>
 
   <section style="grid-column: 1 / -1;">
@@ -287,12 +289,12 @@
 
   function renderBattles() {
     const tbody = $("battles");
-    const table = $("battleTable");
+    const wrap = $("battleTableWrap");
     tbody.innerHTML = "";
     const onlyAllowed = $("onlyAllowed").checked;
 
     const rows = state.battles.filter((b) => !onlyAllowed || joinableAccounts(b).length > 0);
-    table.style.display = rows.length ? "" : "none";
+    wrap.style.display = rows.length ? "" : "none";
 
     rows.forEach((b) => {
       const players = (b.users || []).length;
@@ -317,8 +319,10 @@
   }
 
   /* Selecting a battle points every account that may join it at that battle,
-     and only those accounts are left enabled for the next Start. */
-  function pickBattle(battleId) {
+     and only those accounts are left enabled for the next Start.
+     The change is saved immediately: leaving it only in the browser meant Start
+     launched with whatever battle the server still had stored. */
+  async function pickBattle(battleId) {
     const battle = state.battles.find((b) => b.battleId === battleId);
     if (!battle || !state.config) return;
 
@@ -335,11 +339,14 @@
       }
     }
     renderAccounts(state.config.accounts);
+
+    const saved = await saveConfig();
     setMsg(
       "accMsg",
       `"${battle.name}" selected for ${allowed} account(s)` +
-        (blocked ? `, ${blocked} disabled (rank outside ${battle.minRank}–${battle.maxRank})` : ""),
-      "ok"
+        (blocked ? `, ${blocked} disabled (rank outside ${battle.minRank}-${battle.maxRank})` : "") +
+        (saved ? "" : " — NOT SAVED, check the message above"),
+      saved ? "ok" : "err"
     );
     beep(760, 90, 0.08);
   }
@@ -376,7 +383,7 @@
   }
 
   async function saveConfig() {
-    if (!state.config) return;
+    if (!state.config) return false;
     const body = JSON.stringify(collectConfig());
     try {
       const res = await fetch("/api/config", { method: "PUT", headers: { "Content-Type": "application/json" }, body });
@@ -385,8 +392,10 @@
       renderConfig(data.config);
       setMsg("cfgMsg", "Saved. Changes apply to the next start.", "ok");
       setMsg("accMsg", "Saved.", "ok");
+      return true;
     } catch (err) {
       setMsg("cfgMsg", "Save failed: " + err.message, "err");
+      return false;
     }
   }
 
