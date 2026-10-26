@@ -95,7 +95,7 @@ function publicConfig(cfg) {
   return { ...cfg, accounts: cfg.accounts.map((a) => ({ ...a, password: a.password ? MASK : "" })) };
 }
 
-function startAccount(account) {
+function startAccount(account, accountCount, accountIndex) {
   const key = account.username.toLowerCase();
   if (processes.has(key)) return { ok: false, error: "already running" };
 
@@ -108,6 +108,8 @@ function startAccount(account) {
     "--target", config.target,
     "--language-code", config.language,
     "--retry-ms", String(config.retryMs),
+    "--accounts", String(accountCount || 1),
+    "--account-index", String(accountIndex || 0),
     "--session-timeout-sec", String(config.sessionTimeoutSec),
   ];
   if (config.proxy) args.push("--proxy", config.proxy);
@@ -211,12 +213,27 @@ io.on("connection", (socket) => {
   socket.on("start", (username, ack) => {
     const account = config.accounts.find((a) => a.username.toLowerCase() === String(username).toLowerCase());
     if (!account) return ack?.({ ok: false, error: "unknown account" });
-    ack?.(startAccount(account));
+    const enabled = config.accounts.filter((a) => a.enabled);
+    const index = enabled.findIndex((a) => a.username.toLowerCase() === account.username.toLowerCase());
+    ack?.(startAccount(account, enabled.length, Math.max(0, index)));
   });
 
-  socket.on("start-all", (_, ack) => {
-    const results = config.accounts.filter((a) => a.enabled).map((a) => ({ username: a.username, ...startAccount(a) }));
-    ack?.({ ok: true, results });
+  // Stagger starts so the accounts never hit the game server at the same instant.
+  // Each account gets its own slot inside the retry window, so their retry loops
+  // interleave instead of colliding every cycle.
+  socket.on("start-all", async (_, ack) => {
+    const targets = config.accounts.filter((a) => a.enabled);
+    const step = Math.max(50, Math.floor(config.retryMs / Math.max(1, targets.length)));
+    const results = [];
+    for (let i = 0; i < targets.length; i++) {
+      const account = targets[i];
+      results.push({ username: account.username, ...startAccount(account, targets.length, i) });
+      if (i < targets.length - 1) {
+        io.emit("progress", { done: i + 1, total: targets.length });
+        await new Promise((resolve) => setTimeout(resolve, step));
+      }
+    }
+    ack?.({ ok: true, results, stepMs: step, periodMs: Math.max(1200, config.retryMs) });
   });
 
   socket.on("stop", (username, ack) => ack?.(stopAccount(username)));

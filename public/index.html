@@ -64,7 +64,7 @@
         <input id="language">
       </div>
       <div>
-        <label for="retryMs">Join retry (ms)</label>
+        <label for="retryMs">Join retry budget (ms, split across accounts)</label>
         <input id="retryMs" type="number" min="50">
       </div>
     </div>
@@ -222,8 +222,12 @@
   }
 
   function startAll() {
+    setMsg("accMsg", "Starting…", "ok");
     socket.emit("start-all", null, (res) => {
-      setMsg("accMsg", `Started ${res.results.filter((r) => r.ok).length} of ${res.results.length}`, "ok");
+      const started = res.results.filter((r) => r.ok).length;
+      const spread = res.stepMs ? ` (${res.stepMs}ms apart` : "";
+      const period = res.periodMs ? `, each retries every ${res.periodMs}ms)` : spread ? ")" : "";
+      setMsg("accMsg", `Started ${started} of ${res.results.length}${spread}${period}`, "ok");
     });
   }
 

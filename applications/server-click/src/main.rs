@@ -49,9 +49,18 @@ struct Args {
     #[arg(long)]
     join_on_leave: bool,
 
-    /// Milliseconds between join attempts
+    /// Shared retry budget in milliseconds: accounts are spread evenly inside this window
+    /// and each one retries every (retry_ms * accounts) afterwards
     #[arg(long, default_value_t = 500)]
     retry_ms: u64,
+
+    /// How many accounts share the retry window, used to space their attempts apart
+    #[arg(long, default_value_t = 1)]
+    accounts: u64,
+
+    /// This account's position in the stagger (0-based)
+    #[arg(long, default_value_t = 0)]
+    account_index: u64,
 
     /// Seconds to wait for a session event before giving up
     #[arg(long, default_value_t = 60)]
@@ -362,6 +371,8 @@ async fn run_session(args: &Args) -> anyhow::Result<()> {
         info!("{} - Battle id {} (from link)", args.username, battle_id);
     }
 
+    let (retry_period, retry_offset) = retry_schedule(args);
+
     enter_battle(
         &mut session,
         &battle_list,
@@ -369,6 +380,8 @@ async fn run_session(args: &Args) -> anyhow::Result<()> {
         team,
         session_timeout,
         args.join_on_leave,
+        retry_period,
+        retry_offset,
         &args.username,
     )
     .await?;
@@ -390,10 +403,12 @@ async fn run_session(args: &Args) -> anyhow::Result<()> {
                     enter_battle(
                         &mut session,
                         &battle_list,
-                        &args.map,
+                        &battle_id,
                         team,
                         session_timeout,
                         true,
+                        retry_period,
+                        retry_offset,
                         &args.username,
                     )
                     .await?;
@@ -419,6 +434,30 @@ fn team_for_side(side: &str) -> BattleTeam {
     }
 }
 
+/// Smallest retry period that actually holds on the live server. Below roughly 1.2s the
+/// session cannot drain the packets each attempt generates (battle list, info, chat) before
+/// the next attempt is due, so the queue backs up and the gap grows without bound.
+const MIN_STABLE_RETRY: Duration = Duration::from_millis(1200);
+
+/// Turns the configured `--retry-ms` into this account's own retry period and its starting
+/// offset, so accounts interleave instead of colliding.
+///
+/// `--retry-ms` is the minimum gap per account. With 4 accounts and 2000ms the starts are
+/// spread 500ms apart (2000/4) and each account still retries every 2000ms:
+///   acc1 at 0ms, acc2 at 500ms, acc3 at 1000ms, acc4 at 1500ms, acc1 at 2000ms ...
+fn retry_schedule(args: &Args) -> (Duration, Duration) {
+    let accounts = args.accounts.max(1);
+    let period_ms = args.retry_ms.max(MIN_STABLE_RETRY.as_millis() as u64);
+
+    let slot_ms = period_ms / accounts;
+    let offset_ms = slot_ms * args.account_index.min(accounts - 1);
+
+    (
+        Duration::from_millis(period_ms),
+        Duration::from_millis(offset_ms),
+    )
+}
+
 async fn enter_battle(
     session: &mut Session,
     battle_list: &BattleListCache,
@@ -426,6 +465,8 @@ async fn enter_battle(
     team: BattleTeam,
     timeout_duration: Duration,
     keep_trying: bool,
+    retry_period: Duration,
+    retry_offset: Duration,
     username: &str,
 ) -> anyhow::Result<()> {
     let battle_id = battle_id.to_string();
@@ -497,27 +538,44 @@ async fn enter_battle(
     /* The real client selects a battle once and joins; if the match is full the join simply
        does not produce the Battle layout switch. That is the normal state for a slot sniper:
        with join-on-leave enabled keep trying until a slot frees up, otherwise fail once.
-       A disconnect is fatal here - retrying it would spin at full speed forever. */
-    let attempt_timeout = Duration::from_secs(4);
+       A disconnect is fatal here - retrying it would spin at full speed forever.
+
+       One attempt cycle must last exactly `retry_period`, so we wait only for the time the
+       attempt itself did not already consume. Otherwise every account retries at half rate. */
+    let attempt_timeout = Duration::from_millis(300);
+    let mut first_retry = true;
     loop {
-        match try_join(session, &battle_id, team, attempt_timeout, username).await {
+        let cycle_start = std::time::Instant::now();
+
+        let attempt_start = std::time::Instant::now();
+        let outcome = try_join(session, &battle_id, team, attempt_timeout, username).await;
+        let attempt_took = attempt_start.elapsed();
+
+        match outcome {
             Ok(JoinAttempt::Joined) => return Ok(()),
             Ok(JoinAttempt::Full) if keep_trying => {
-                /* Do not hammer the server on a fixed timer. Wait for the server to say that
-                   somebody left, then try once; fall back to a slow probe if a battle stays
-                   quiet, so a missed event cannot wedge us forever. */
-                info!("{} - Match is full, waiting for a free slot", username);
-                wait_for_slot(session, &battle_id, SLOT_WAIT).await?;
-                info!("{} - Trying again", username);
+                /* Keep each account on its own phase: the first wait carries this account's
+                   stagger offset so parallel accounts never fire together. */
+                let offset = if first_retry { retry_offset } else { Duration::ZERO };
+                first_retry = false;
+
+                let remaining = (retry_period + offset)
+                    .saturating_sub(cycle_start.elapsed())
+                    .max(Duration::from_millis(50));
+
+                info!(
+                    "{} - Match is full (attempt {}ms), retrying in {}ms",
+                    username,
+                    attempt_took.as_millis(),
+                    remaining.as_millis()
+                );
+                wait_for_slot(session, &battle_id, remaining).await?;
             }
             Ok(JoinAttempt::Full) => anyhow::bail!("match is full"),
             Err(error) => return Err(error),
         }
     }
 }
-
-/// Longest we stay quiet waiting for a leave event before probing anyway.
-const SLOT_WAIT: Duration = Duration::from_secs(45);
 
 /// Blocks until somebody leaves the battle, or the timeout expires.
 async fn wait_for_slot(
@@ -572,8 +630,7 @@ fn battle_ids(json: &str) -> Vec<String> {
         .collect()
 }
 
-/// One select + join attempt. An error means "no slot this time", not a fatal failure.
-/// Outcome of one select + join attempt.
+/// Outcome of one join attempt.
 enum JoinAttempt {
     /// We are in the battle.
     Joined,
@@ -581,6 +638,9 @@ enum JoinAttempt {
     Full,
 }
 
+/// One join attempt inside a single bounded window: ask to select the battle, immediately
+/// ask to join it, then wait once for the Battle layout switch. Waiting on the select echo
+/// first doubles the cycle and lets the incoming queue back up.
 async fn try_join(
     session: &mut Session,
     battle_id: &str,
@@ -591,21 +651,6 @@ async fn try_join(
     session.connection.send_packet(&packets::c2s::BattleListBattleSelect {
         item: battle_id.to_string(),
     })?;
-
-    let select_id = battle_id.to_string();
-    match timeout(timeout_duration, session.await_match(move |_, packet| {
-        packet
-            .downcast_ref::<packets::s2c::BattleListBattleSelect>()
-            .filter(|packet| packet.item == select_id)
-            .map(|_| ())
-    }))
-    .await
-    {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => return Err(error),
-        Err(_) => return Ok(JoinAttempt::Full),
-    }
-
     session.connection.send_packet(&packets::s2c::BattleInfoJoinBattle {
         var_625: team,
     })?;
