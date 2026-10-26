@@ -141,6 +141,7 @@ async fn connect(args: &Args) -> anyhow::Result<Session> {
     let mut session = Session::builder()
         .set_lang_code(args.language_code.clone())
         .set_log_filter(filter)
+        .allow_unknown_packets()
         .connect_with_socket(target, stream)
         .await?;
 
