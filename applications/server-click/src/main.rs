@@ -236,14 +236,40 @@ async fn enter_battle(
         Err(_) => anyhow::bail!("lobby ready timed out"),
     }
 
-    /* Try joining directly; the select step is what the live server was rejecting. */
-    info!("{} - Sending direct join for {}", username, battle_id);
-
-    /* Request the join and wait for the battle lobby state transition. */
-    session.connection.send_packet(&packets::s2c::BattleInfoJoinBattle {
-        var_625: team,
+    /* The live server rejected both battle-list and direct battle-info joins.
+       Try the link-query flow, but only after the lobby is fully ready. */
+    session.connection.send_packet(&packets::c2s::LinkQuery {
+        battle_id: battle_id.clone(),
     })?;
-    info!("{} - Sent BattleInfoJoinBattle", username);
+    info!("{} - Sent LinkQuery {}", username, battle_id);
+
+    let match_id = battle_id.clone();
+    let result = timeout(timeout_duration, session.await_match(move |_, packet| {
+        if let Some(packet) = packet.downcast_ref::<packets::s2c::LinkResultAlive>() {
+            if packet.battle_id == match_id {
+                return Some(true);
+            }
+        }
+        if let Some(packet) = packet.downcast_ref::<packets::s2c::LinkResultDead>() {
+            if packet.battle_id == match_id {
+                return Some(false);
+            }
+        }
+        None
+    }))
+    .await;
+
+    match result {
+        Ok(Ok(true)) => info!("{} - Link is alive", username),
+        Ok(Ok(false)) => anyhow::bail!("link is dead"),
+        Ok(Err(error)) => return Err(error),
+        Err(_) => anyhow::bail!("link query timed out"),
+    }
+
+    session.connection.send_packet(&packets::c2s::LinkActivateLink {
+        link: battle_id.clone(),
+    })?;
+    info!("{} - Sent LinkActivateLink {}", username, battle_id);
 
     let result = timeout(timeout_duration, session.await_match(|_, packet| {
         packet
