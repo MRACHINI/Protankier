@@ -109,10 +109,9 @@ impl Task for LoginTask {
 }
 
 async fn login(session: &mut Session, username: &str, password: &str) -> anyhow::Result<LoginOutcome> {
-    let (tx, rx) = oneshot::channel();
+    let (tx, _rx) = oneshot::channel();
     let task = LoginTask { username: username.to_string(), password: password.to_string(), tx: Some(tx), sent: false };
-    let _handle = session.execute_task(task);
-    let outcome = rx.await.context("login channel closed")?;
+    let outcome = session.execute_task(task).await.context("login channel closed")?;
     Ok(outcome)
 }
 
