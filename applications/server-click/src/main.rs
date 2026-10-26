@@ -70,6 +70,7 @@ enum LoginOutcome {
 enum SessionError {
     WrongCredentials,
     Banned,
+    InvalidBattleLink,
     BattleNotListed { battle_id: String, online: usize },
 }
 
@@ -78,6 +79,10 @@ impl std::fmt::Display for SessionError {
         match self {
             SessionError::WrongCredentials => write!(f, "login failed: wrong credentials"),
             SessionError::Banned => write!(f, "login failed: account banned"),
+            SessionError::InvalidBattleLink => write!(
+                f,
+                "no battle id found in the link; paste something like https://protanki.online/#/battle/<id>"
+            ),
             SessionError::BattleNotListed { battle_id, online } => write!(
                 f,
                 "battle {} is not in the server list ({} battles online)",
@@ -169,6 +174,43 @@ impl fost_client_utils::PacketHandler for BattleListCache {
     }
 }
 
+/// Pulls a battle id out of whatever the user pasted: a bare id, or a site link
+/// such as `https://protanki.online/#/battle/6d861a7deab94d07`.
+/// Returns an empty string when no plausible id is present.
+fn parse_battle_id(input: &str) -> String {
+    let trimmed = input.trim();
+
+    let candidate = if let Some(index) = trimmed.find("#/battle/") {
+        &trimmed[index + "#/battle/".len()..]
+    } else if let Some(index) = trimmed.find("/battle/") {
+        &trimmed[index + "/battle/".len()..]
+    } else {
+        trimmed
+    };
+
+    let cleaned = cleanup_segment(candidate);
+    if looks_like_battle_id(&cleaned) {
+        cleaned
+    } else {
+        String::new()
+    }
+}
+
+/// Battle ids are a run of hex characters; drop any query string, anchor or path tail.
+fn cleanup_segment(segment: &str) -> String {
+    segment
+        .split(['?', '#', '/', '&', ' '])
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+/// Guards against pasting a non-battle link and treating part of the URL as an id.
+fn looks_like_battle_id(candidate: &str) -> bool {
+    (8..=32).contains(&candidate.len()) && candidate.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 /// Reports incoming packets that no handler recognised, so we can see
 /// what the live server sends that our packet table does not cover.
 struct UnknownPacketLog;
@@ -230,16 +272,40 @@ async fn connect(args: &Args) -> anyhow::Result<(Session, BattleListCache)> {
     Ok((session, battle_list))
 }
 
+/// How the previous session ended, which decides whether reconnecting is sensible.
+fn is_takeover(error: &anyhow::Error) -> bool {
+    let text = error.to_string().to_lowercase();
+    /* The server closes us with a clean disconnect when the same account logs in
+       elsewhere (for example the player opening the real game client). */
+    text.contains("connectionclosed") || text.contains("remote host closed")
+}
+
 async fn run_click(args: &Args) -> anyhow::Result<()> {
     let mut attempt = 0u32;
+    let mut takeovers = 0u32;
+
     loop {
         match run_session(args).await {
             Ok(()) => return Ok(()),
             Err(error) if is_permanent(&error) => return Err(error),
             Err(error) if !args.join_on_leave => return Err(error),
             Err(error) => {
-                /* The server drops battle sessions periodically; reconnect instead of dying. */
                 attempt += 1;
+
+                /* If the account keeps getting taken over, our reconnects are what kicks the
+                   real player back out. Argue with them a few times, then stand down. */
+                if is_takeover(&error) {
+                    takeovers += 1;
+                    if takeovers > 3 {
+                        anyhow::bail!(
+                            "account is in use elsewhere (logged in another client {} times); stopping so we stop kicking it",
+                            takeovers
+                        );
+                    }
+                } else {
+                    takeovers = 0;
+                }
+
                 let delay = Duration::from_secs(3).min(Duration::from_millis(500) * attempt);
                 warn!(
                     "{} - Session ended ({}); reconnecting in {}s",
@@ -258,6 +324,7 @@ fn is_permanent(error: &anyhow::Error) -> bool {
     match error.downcast_ref::<SessionError>() {
         Some(SessionError::WrongCredentials) | Some(SessionError::Banned) => true,
         Some(SessionError::BattleNotListed { .. }) => true,
+        Some(SessionError::InvalidBattleLink) => true,
         _ => false,
     }
 }
@@ -286,11 +353,19 @@ async fn run_session(args: &Args) -> anyhow::Result<()> {
 
     let session_timeout = Duration::from_secs(args.session_timeout_sec);
     let team = team_for_side(&args.side);
+    let battle_id = parse_battle_id(&args.map);
+
+    if battle_id.is_empty() {
+        return Err(SessionError::InvalidBattleLink.into());
+    }
+    if battle_id != args.map.trim() {
+        info!("{} - Battle id {} (from link)", args.username, battle_id);
+    }
 
     enter_battle(
         &mut session,
         &battle_list,
-        &args.map,
+        &battle_id,
         team,
         session_timeout,
         args.join_on_leave,
@@ -424,17 +499,61 @@ async fn enter_battle(
        with join-on-leave enabled keep trying until a slot frees up, otherwise fail once.
        A disconnect is fatal here - retrying it would spin at full speed forever. */
     let attempt_timeout = Duration::from_secs(4);
-    let retry_pause = Duration::from_millis(600);
     loop {
         match try_join(session, &battle_id, team, attempt_timeout, username).await {
             Ok(JoinAttempt::Joined) => return Ok(()),
             Ok(JoinAttempt::Full) if keep_trying => {
-                warn!("{} - Match is full; retrying", username);
-                tokio::time::sleep(retry_pause).await;
+                /* Do not hammer the server on a fixed timer. Wait for the server to say that
+                   somebody left, then try once; fall back to a slow probe if a battle stays
+                   quiet, so a missed event cannot wedge us forever. */
+                info!("{} - Match is full, waiting for a free slot", username);
+                wait_for_slot(session, &battle_id, SLOT_WAIT).await?;
+                info!("{} - Trying again", username);
             }
             Ok(JoinAttempt::Full) => anyhow::bail!("match is full"),
             Err(error) => return Err(error),
         }
+    }
+}
+
+/// Longest we stay quiet waiting for a leave event before probing anyway.
+const SLOT_WAIT: Duration = Duration::from_secs(45);
+
+/// Blocks until somebody leaves the battle, or the timeout expires.
+async fn wait_for_slot(
+    session: &mut Session,
+    battle_id: &str,
+    limit: Duration,
+) -> anyhow::Result<()> {
+    let battle_id = battle_id.to_string();
+
+    let result = timeout(limit, session.await_match(move |_, packet| {
+        /* Any membership change is worth reacting to: a departure frees a slot.
+           Names are generated as {Model}{Packet} from packets.yml. */
+        if let Some(p) = packet.downcast_ref::<packets::s2c::BattleInfoRemoveUser>() {
+            if p.battle_id == battle_id {
+                return Some(());
+            }
+        }
+        if let Some(p) = packet.downcast_ref::<packets::s2c::BattleUserListUnknown504016996>() {
+            if p.battle_id == battle_id {
+                return Some(());
+            }
+        }
+        if let Some(p) = packet.downcast_ref::<packets::s2c::BattleUserListUserJoinBattleWithTeam>() {
+            if p.battle_id == battle_id {
+                return Some(());
+            }
+        }
+        None
+    }))
+    .await;
+
+    match result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(error),
+        /* No event arrived: probe anyway in case we missed one. */
+        Err(_) => Ok(()),
     }
 }
 

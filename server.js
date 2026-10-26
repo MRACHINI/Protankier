@@ -47,6 +47,20 @@ function saveConfig(next) {
   config = next;
 }
 
+// Accepts a bare battle id or a pasted site link such as "#/battle/e2e702ee47fa9be8".
+function normalizeBattleId(input) {
+  const raw = String(input ?? "").trim();
+  let candidate = raw;
+  const anchor = raw.indexOf("#/battle/");
+  const path = raw.indexOf("/battle/");
+  if (anchor >= 0) candidate = raw.slice(anchor + "#/battle/".length);
+  else if (path >= 0) candidate = raw.slice(path + "/battle/".length);
+  candidate = candidate.split(/[?#/&\s]/)[0].trim();
+  const isId = candidate.length >= 8 && candidate.length <= 32 && /^[0-9a-fA-F]+$/.test(candidate);
+  // Keep the raw text when we cannot parse it, so the user sees what they typed.
+  return isId ? candidate : raw;
+}
+
 function sanitizeConfig(input) {
   const out = { ...DEFAULT_CONFIG };
   out.target = String(input.target ?? DEFAULT_CONFIG.target).trim();
@@ -60,7 +74,7 @@ function sanitizeConfig(input) {
     ? input.accounts.map((a) => ({
         username: String(a.username ?? "").trim(),
         password: String(a.password ?? ""),
-        battleId: String(a.battleId ?? "").trim(),
+        battleId: normalizeBattleId(a.battleId),
         side: ["Alpha", "Bravo", "J"].includes(a.side) ? a.side : "J",
         enabled: a.enabled !== false,
       })).filter((a) => a.username)
@@ -75,8 +89,10 @@ function record(entry) {
   io.emit("log", line);
 }
 
+const MASK = "********";
+
 function publicConfig(cfg) {
-  return { ...cfg, accounts: cfg.accounts.map((a) => ({ ...a, password: a.password ? "********" : "" })) };
+  return { ...cfg, accounts: cfg.accounts.map((a) => ({ ...a, password: a.password ? MASK : "" })) };
 }
 
 function startAccount(account) {
@@ -166,7 +182,8 @@ const server = http.createServer((req, res) => {
         const next = sanitizeConfig(JSON.parse(body || "{}"));
         for (const account of next.accounts) {
           const previous = config.accounts.find((a) => a.username.toLowerCase() === account.username.toLowerCase());
-          if (!account.password && previous) account.password = previous.password;
+          // A blank or still-masked field means "unchanged"; never persist the mask itself.
+          if ((!account.password || account.password === MASK) && previous) account.password = previous.password;
         }
         saveConfig(next);
         record({ level: "info", message: "configuration saved" });
