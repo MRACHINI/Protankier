@@ -236,40 +236,60 @@ async fn enter_battle(
         Err(_) => anyhow::bail!("lobby ready timed out"),
     }
 
-    /* The live server rejected both battle-list and direct battle-info joins.
-       Try the link-query flow, but only after the lobby is fully ready. */
-    session.connection.send_packet(&packets::c2s::LinkQuery {
-        battle_id: battle_id.clone(),
-    })?;
-    info!("{} - Sent LinkQuery {}", username, battle_id);
+    /* The real client waits for the server's battle list before selecting.
+       Selecting before this packet arrives makes the live server drop the connection. */
+    let list_result = timeout(timeout_duration, session.await_match(|_, packet| {
+        packet
+            .downcast_ref::<packets::s2c::BattleListListCreate>()
+            .map(|packet| packet.json.clone())
+    }))
+    .await;
 
-    let match_id = battle_id.clone();
+    match list_result {
+        Ok(Ok(json)) => {
+            let battles = serde_json::from_str::<serde_json::Value>(&json)
+                .ok()
+                .and_then(|value| value.get("battles").and_then(|b| b.as_array()).cloned())
+                .unwrap_or_default();
+            let present = battles.iter().any(|battle| {
+                battle.get("battleId").and_then(|id| id.as_str()) == Some(battle_id.as_str())
+            });
+            info!(
+                "{} - Battle list received ({} battles, configured id present: {})",
+                username,
+                battles.len(),
+                present
+            );
+        }
+        Ok(Err(error)) => return Err(error),
+        Err(_) => info!("{} - Battle list not received; continuing", username),
+    }
+
+    /* The real client only selects a battle after the server's list arrives, then joins it. */
+    session.connection.send_packet(&packets::c2s::BattleListBattleSelect {
+        item: battle_id.clone(),
+    })?;
+    info!("{} - Sent BattleListSelect {}", username, battle_id);
+
+    let select_id = battle_id.clone();
     let result = timeout(timeout_duration, session.await_match(move |_, packet| {
-        if let Some(packet) = packet.downcast_ref::<packets::s2c::LinkResultAlive>() {
-            if packet.battle_id == match_id {
-                return Some(true);
-            }
-        }
-        if let Some(packet) = packet.downcast_ref::<packets::s2c::LinkResultDead>() {
-            if packet.battle_id == match_id {
-                return Some(false);
-            }
-        }
-        None
+        packet
+            .downcast_ref::<packets::s2c::BattleListBattleSelect>()
+            .filter(|packet| packet.item == select_id)
+            .map(|_| ())
     }))
     .await;
 
     match result {
-        Ok(Ok(true)) => info!("{} - Link is alive", username),
-        Ok(Ok(false)) => anyhow::bail!("link is dead"),
+        Ok(Ok(())) => info!("{} - Battle selected", username),
         Ok(Err(error)) => return Err(error),
-        Err(_) => anyhow::bail!("link query timed out"),
+        Err(_) => anyhow::bail!("battle selection timed out"),
     }
 
-    session.connection.send_packet(&packets::c2s::LinkActivateLink {
-        link: battle_id.clone(),
+    session.connection.send_packet(&packets::s2c::BattleInfoJoinBattle {
+        var_625: team,
     })?;
-    info!("{} - Sent LinkActivateLink {}", username, battle_id);
+    info!("{} - Sent BattleInfoJoinBattle", username);
 
     let result = timeout(timeout_duration, session.await_match(|_, packet| {
         packet
