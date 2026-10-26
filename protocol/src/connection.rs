@@ -221,7 +221,12 @@ impl Connection {
         };
 
         if trace_frames {
-            eprintln!("[FRAME] len={} id={} compressed={} raw_head={:02x?} decrypted_head={:02x?} decompressed_len={}", packet_length, packet_id as i32, packet_is_compressed, raw_head, &decompressed_payload[..decompressed_payload.len().min(16)], decompressed_payload.len());
+            let full_hex: String = if std::env::var_os("FROST_TRACE_FULL").is_some() && decompressed_payload.len() <= 512 {
+                decompressed_payload.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ")
+            } else {
+                String::new()
+            };
+            eprintln!("[FRAME] len={} id={} compressed={} raw_head={:02x?} decrypted_head={:02x?} decompressed_len={} full=[{}]", packet_length, packet_id as i32, packet_is_compressed, raw_head, &decompressed_payload[..decompressed_payload.len().min(16)], decompressed_payload.len(), full_hex);
         }
 
         let mut packet_reader = Cursor::new(&decompressed_payload[..]);

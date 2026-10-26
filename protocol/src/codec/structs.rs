@@ -31,7 +31,7 @@ macro_rules! codec_struct {
 
 #[derive(Default, Clone)]
 pub struct ResourceReference {
-    pub resource_id: u32
+    pub resource_id: u64
 }
 impl Codeable for ResourceReference {
     fn encode(&self, writer: &mut dyn std::io::Write) -> ProtocolResult<()> {
@@ -83,8 +83,8 @@ codec_struct!(UserStatus {
 });
 
 codec_struct!(UserStat {
-    deaths: i32
-    kills: i32
+    deaths: i16
+    kills: i16
     score: i32
     user: String
 });
@@ -117,9 +117,9 @@ codec_struct!(UserPropertyCC {
 
 codec_struct!(UserInfo {
     chat_moderator_level: ChatModeratorLevel
-    deaths: i32
-    kills: i32
-    rank: i8
+    deaths: i16
+    kills: i16
+    rank: u8
     score: i32
     uid: String
 });
@@ -366,7 +366,7 @@ codec_struct!(ChatCC {
     chat_moderator_level: ChatModeratorLevel
     links_white_list: Option<Vec<String>>
     min_char: i32
-    min_word: i32
+    min_word: i16
     self_name: String
     show_links: bool
     typing_speed_antiflood_enabled: bool
@@ -424,7 +424,7 @@ codec_struct!(BattleMineCC {
 codec_struct!(BattleMine {
     mine_id: String
     owner_id: String
-    position: Option<Vector3<f32>>
+    position: Vector3<f32>
 });
 
 codec_struct!(BattleLimits {
@@ -447,8 +447,6 @@ codec_struct!(BattleInviteCC {
 });
 
 codec_struct!(BattleInfoUser {
-    kills: i32
-    score: i32
     suspicious: bool
     user: String
 });
