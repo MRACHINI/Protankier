@@ -236,25 +236,8 @@ async fn enter_battle(
         Err(_) => anyhow::bail!("lobby ready timed out"),
     }
 
-    /* Select the target battle in the live battle list. */
-    session.connection.send_packet(&packets::c2s::BattleListBattleSelect {
-        item: battle_id.clone(),
-    })?;
-    info!("{} - Sent BattleListSelect {}", username, battle_id);
-
-    let result = timeout(timeout_duration, session.await_match(move |_, packet| {
-        packet
-            .downcast_ref::<packets::s2c::BattleListBattleSelect>()
-            .filter(|packet| packet.item == battle_id)
-            .map(|_| ())
-    }))
-    .await;
-
-    match result {
-        Ok(Ok(())) => info!("{} - Battle selected", username),
-        Ok(Err(error)) => return Err(error),
-        Err(_) => anyhow::bail!("battle selection timed out"),
-    }
+    /* Try joining directly; the select step is what the live server was rejecting. */
+    info!("{} - Sending direct join for {}", username, battle_id);
 
     /* Request the join and wait for the battle lobby state transition. */
     session.connection.send_packet(&packets::s2c::BattleInfoJoinBattle {
