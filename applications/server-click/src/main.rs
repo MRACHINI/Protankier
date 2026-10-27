@@ -118,6 +118,54 @@ impl std::fmt::Display for SessionError {
 
 impl std::error::Error for SessionError {}
 
+/// Remembers that the server just ended the round / destroyed the battle.
+///
+/// A close that follows one of these packets means the battle went away, so the socket died
+/// because of the round ending, not because another client took the account over. `v2.0.17`
+/// stops on every lost session, which is correct for a takeover but leaves the clicker idle
+/// after a perfectly ordinary round end.
+///
+/// The timestamp matters: a round finish early in a long session must not authorise a
+/// reconnect minutes later when the session ends for some other reason. Only a round end
+/// within `RECENT` of the close counts as the cause.
+#[derive(Clone, Default)]
+struct RoundEnded(std::sync::Arc<std::sync::Mutex<Option<std::time::Instant>>>);
+
+/// How shortly before a disconnect a round end must have fired to be considered its cause.
+const ROUND_END_WINDOW: Duration = Duration::from_secs(5);
+
+impl RoundEnded {
+    fn mark(&self) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = Some(std::time::Instant::now());
+        }
+    }
+
+    /// True when a round end fired recently enough to explain a disconnect.
+    fn explains_disconnect(&self) -> bool {
+        let stamp = self.0.lock().ok().and_then(|mut slot| slot.take());
+        stamp.map(|at| at.elapsed() <= ROUND_END_WINDOW).unwrap_or(false)
+    }
+
+    fn clear(&self) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = None;
+        }
+    }
+}
+
+impl fost_client_utils::PacketHandler for RoundEnded {
+    fn handle_packet(&mut self, _client: &mut Session, packet: &dyn Packet) -> anyhow::Result<()> {
+        /* Both fire when a round is over or the battle is being torn down. */
+        if packet.is_type::<packets::s2c::BattleInfoRoundFinish>()
+            || packet.is_type::<packets::s2c::BattleInfoInfoDestroy>()
+        {
+            self.mark();
+        }
+        Ok(())
+    }
+}
+
 struct LoginTask {
     username: String,
     password: String,
@@ -268,7 +316,7 @@ fn build_proxy(proxy: &str) -> anyhow::Result<Box<dyn ProxyProvider>> {
     }
 }
 
-async fn connect(args: &Args) -> anyhow::Result<(Session, BattleListCache)> {
+async fn connect(args: &Args, round_ended: RoundEnded) -> anyhow::Result<(Session, BattleListCache)> {
     let provider = build_proxy(&args.proxy)?;
     let mut proxy: Box<dyn Proxy> = provider.next_proxy().context("no proxy available")?;
     let target: std::net::SocketAddr = args.target.parse().context("invalid target address")?;
@@ -292,39 +340,65 @@ async fn connect(args: &Args) -> anyhow::Result<(Session, BattleListCache)> {
     session.register_packet_handler(SessionPing {});
     let battle_list = BattleListCache::default();
     session.register_packet_handler(battle_list.clone());
+    /* Shared with the caller so the disconnect policy can see the round-end signal after
+       this session is gone. */
+    session.register_packet_handler(round_ended);
     session.register_packet_handler(UnknownPacketLog);
     Ok((session, battle_list))
 }
 
-/// Zero-reconnect policy.
+/// Disconnect policy.
 ///
-/// The server cannot tell us whether a disconnect was caused by the player logging in
-/// elsewhere or by its own idle/housekeeping drop: both sides of a takeover receive the
-/// same `ConnectionClosed(Disconnected)`, verified by running two clients on one account.
-/// Since a reconnect is what evicts the human, the clicker never reconnects on its own.
-/// Any lost session stops the account and waits for an explicit Start.
+/// A reconnect is what evicts the human player, and the wire format gives no "you were
+/// evicted" notice: both sides of a takeover receive the same `ConnectionClosed(Disconnected)`
+/// (verified by running two clients on one account). So the clicker does not reconnect blindly.
+///
+/// There is, however, one case that *is* identifiable: a close that follows
+/// `BattleInfoRoundFinish` / `BattleInfoInfoDestroy`. The round ended and the server tore the
+/// battle down, which cannot be a takeover of our account, so re-joining is safe and is
+/// exactly what a slot sniper should do. Every other lost session stops the account and
+/// waits for an explicit Start.
 async fn run_click(args: &Args) -> anyhow::Result<()> {
-    match run_session(args).await {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            let text = error.to_string();
+    /* Owned here, not inside the session: it must survive the session ending so the policy
+       can tell "the round finished" from "we may have been evicted". */
+    let round_ended = RoundEnded::default();
+    let mut reconnects = 0u32;
 
-            /* Permanent configuration problems get a "failed" state; anything else that
-               ended the session gets "paused", which is the user's cue to press Start. */
-            if is_permanent(&error) {
-                report("failed", &text);
-                return Err(error);
+    loop {
+        round_ended.clear();
+        let outcome = run_session(args, round_ended.clone()).await;
+        let after_round_end = round_ended.explains_disconnect();
+
+        match outcome {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                let text = error.to_string();
+
+                if is_permanent(&error) {
+                    report("failed", &text);
+                    return Err(error);
+                }
+
+                if after_round_end && args.join_on_leave {
+                    reconnects += 1;
+                    info!(
+                        "{} - Round ended, rejoining the battle ({})",
+                        args.username, reconnects
+                    );
+                    report("reconnecting", "round ended; rejoining the battle");
+                    continue;
+                }
+
+                warn!(
+                    "{} - Session ended ({}); not reconnecting, press Start when you are done playing",
+                    args.username, error
+                );
+                report(
+                    "paused",
+                    "session ended - not reconnecting automatically, press Start when ready",
+                );
+                return Ok(());
             }
-
-            warn!(
-                "{} - Session ended ({}); not reconnecting, press Start when you are done playing",
-                args.username, error
-            );
-            report(
-                "paused",
-                "session ended - not reconnecting automatically, press Start when ready",
-            );
-            Ok(())
         }
     }
 }
@@ -342,8 +416,8 @@ fn is_permanent(error: &anyhow::Error) -> bool {
 
 /// Runs one full session: connect, log in, join, then keep watching.
 /// It never retries on its own; the caller decides what a lost session means.
-async fn run_session(args: &Args) -> anyhow::Result<()> {
-    let (mut session, battle_list) = connect(args).await?;
+async fn run_session(args: &Args, round_ended: RoundEnded) -> anyhow::Result<()> {
+    let (mut session, battle_list) = connect(args, round_ended).await?;
     info!("{} - Connected to {}", args.username, args.target);
 
     session.await_server_resources_loaded().await?;
@@ -719,7 +793,7 @@ async fn try_join(
 /// `--action list`: log in, dump the server's battle list as JSON, exit.
 /// Powers the battle picker and the battle resolver in the UI.
 async fn run_list(args: &Args) -> anyhow::Result<()> {
-    let (mut session, battle_list) = connect(args).await?;
+    let (mut session, battle_list) = connect(args, RoundEnded::default()).await?;
     session.await_server_resources_loaded().await?;
 
     match login(&mut session, &args.username, &args.password).await? {

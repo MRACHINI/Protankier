@@ -15,6 +15,25 @@ searching for. Same for the rank filter if it is a text field rather than a fixe
 
 Not implemented yet.
 
+### 0b. Codecs that under-read their payload
+
+The repaired leftover check now reports exactly which layouts are incomplete. Measured over
+4 live sessions:
+
+```
+id=-64696933   x5938  left 4    TankMoveCommand
+id=1516578027  x2800  left 4    TankMoveTurretCommand
+id=-44282936   x600   left 8    (model 51 twin shot)
+id=-369590613  x48    left variable  (model 54 hit)
+id=1422563374  x4     left 5    FriendsInitialize
+```
+
+Harmless today (the extra bytes are skipped, the packet still parses), but each one means
+real data is being dropped, and a 4-byte under-read at a different offset would become a
+hard decode failure. All four are `Vector3<f32>`-shaped gaps of 4 or 8 bytes.
+
+Not urgent. Fix when a packet actually needs the missing field.
+
 ## Open questions
 
 ### 1. Unexplained disconnects (highest priority) — investigation in progress
@@ -92,10 +111,59 @@ arrives.
    `[FRAME] len=... id=...` *before* decoding, so the frame immediately before the error
    names the culprit.
 
-**Next experiment (designed, not yet run):** measure lifetime as a function of the gap
-since the previous login (gaps of 2s, 10s, 30s, 60s, 120s, 300s, 3 samples each). If
-lifetime rises monotonically with the gap, the cause is confirmed and the fix is a minimum
-cooldown between logins rather than anything in the packet layer.
+**Next experiment: superseded.** The cooldown idea was dropped once the decode mechanism was
+found; lifetime variance is better explained by *which* packets arrive.
+
+**STATUS: codec fix built as `test-codec`, not yet released.**
+
+The inverted leftover-bytes check was repaired, and it named the offenders; 22 reachable
+mismatches were then corrected against the reference metadata. The two packets that still
+fail are `X2X` broadcasts (`522993449`, `-1959138292`) whose `initParams` type is absent from
+the packet table, so they are correctly skipped and logged.
+
+**What is proven:** before the fix, a decode failure killed the session outright; after it,
+no session has died with a decode error (`decode-deaths 0/3` in the A/B below). One
+remaining layout warning at login (`FriendsInitialize`, id `1422563374`) is logged and
+harmless.
+
+**What is NOT proven:** that the fix removes the *clean closes*. A 3-run-per-build A/B gave:
+
+```
+v2.0.17   lives 180, 180, 10   decode-deaths 0/3
+test-codec lives 180,  60, 180  decode-deaths 0/3
+```
+
+Both builds survived 2 of 3 runs, so **the two are indistinguishable at n=3** and the clean
+close is a separate, still-unexplained failure mode. It is not a decode error. Candidates:
+the battle ending/restarting (normal behaviour), a server-side close, or a missing
+client-to-server packet such as `Ready2Place` / `Ready2Activate`.
+
+Do not claim the drops are fixed until the tail-capture experiment below says why the clean
+close happens.
+
+Remaining unexplained failure: an occasional **clean close** — now explained.
+
+**The clean close is the battle ending, not a fault.** A tail capture of the last packets
+before each close shows battle-lifecycle traffic immediately beforehand:
+
+```
+run 1  240s  survived   ... TankUpdateTemperature -> Ping
+run 2   45s  clean      ... BattleInfoRemoveUser -> BattleUserList* -> BattleListBattleSelect
+                            -> BattleInfoInfoDestroy -> BattleInfoRoundFinish -> CLOSE
+run 3  240s  survived   ... TankActivated -> Ping -> ServerSessionSync
+run 4  240s  survived   ... TankMoveTurretCommand -> TankUpdateTemperature
+```
+
+`BattleInfoInfoDestroy` + `BattleInfoRoundFinish` mean the round finished and the server
+destroyed the battle. The socket close is the server tearing the battle down, so the
+session ends through no fault of ours. That is also why these clusters are short (~45s)
+and clustered around round ends.
+
+**Consequence for the reconnect policy.** The earlier conclusion "no signal distinguishes
+an eviction from a server close" is now partly wrong: a close that follows
+`BattleInfoRoundFinish` / `BattleInfoInfoDestroy` *is* identifiable as "the battle ended".
+Reconnecting in that case cannot kick a player, because the account was not taken over.
+Whether to act on that is a product decision (see open question below), not a technical one.
 
 ### 2. Duplicate-session detection
 
@@ -112,25 +180,30 @@ which should make an attempt much cheaper. Risk: acting on a stale list.
 
 ## Remaining work
 
-### 4. 30 codec optionality mismatches unfixed
+### 4. Codec optionality mismatches — fixed, keep the checker
 
-`ChatCC.min_word` (i16), `ResourceReference.resource_id` (u64) and `BattleMine.position`
-(non-optional) were fixed because they broke the join. Scoreboard widths (`UserInfo`,
-`UserStat`, `BattleInfoUser`) were fixed too. Roughly 30 structs remain where our
-`Option<T>` disagrees with the reference `Nullable<T>`, for example:
+All 30 mismatches that the reflection tool can see were corrected in `v2.0.18`. The tool
+had been reporting them for a while; what made them matter was that one undecodable packet
+used to end the whole session.
 
-- `MoveCommand.Position` / `Orientation` / velocities — ours optional, really plain
-- `UserInfo.ChatModeratorLevel`, `UserStatus.ChatModeratorLevel` — ours plain, really optional
-- `BattleInfoData.Mode`, `StatisticsModelCC.BattleMode` — ours plain, really optional
-- `ChatMessage.SourceUser` / `TargetUser` — ours optional, really plain
-- `UserContainerCC.Users`, `ClientPointData.TankIds` — array optionality differs
+The connection layer now logs two things that make future drift obvious:
 
-These are latent: the packets are currently ignored, so they have not hurt. Any of them
-will corrupt a packet the moment we start parsing that model.
+- `Skipped undecodable packet id N (<len> bytes): <reason>` — a packet we could not parse.
+- `Packet id N decoded X of Y bytes (Z bytes left over; codec layout may be out of date).`
+  — a packet that parsed but whose layout is missing a field. This is the early warning that
+  precedes a hard failure.
 
-The full diff is reproducible by reflecting over the MIT-licensed `ProtankiNetworking`
-3.0.1 NuGet package and comparing `[Encode(n)]` fields against `codec_struct!` in
-`protocol/src/codec/structs.rs`.
+The leftover check used to be inverted (it fired only when a packet consumed every byte), so
+it never reported anything. That is now correct.
+
+Re-run the diff at any time:
+
+```
+dotnet run --no-build -- <ProtankiNetworking.dll> <net8.0 runtime dir> protocol/src/codec/structs.rs
+```
+
+Append a struct name as a fourth argument to dump the reference field layout for that one
+struct, which is how a specific decode failure gets diagnosed.
 
 ### 5. No automated tests
 
