@@ -2,18 +2,19 @@
 
 Ideas worth checking later. Nothing here is implemented unless it says so.
 
-Last updated after `v2.0.17`.
+Last updated after `v2.0.19`.
 
 ## UI requests from the user
 
-### 0. Battle filter box that survives a refresh
+### 0. Battle filter box that survives a refresh — done in `v2.0.19`
 
-Add a text filter above the battle picker. Typing narrows the list by battle name / id /
-map. The important part: **the filter text must persist across a page refresh** (save it in
-`localStorage` and restore it on load), so a reload does not wipe what the user was
-searching for. Same for the rank filter if it is a text field rather than a fixed dropdown.
+Text filter above the battle picker; matches name, battle id and mode, plus the map field
+when the server's list JSON includes one. The text is saved to `localStorage` on every
+keystroke and restored on load, so a refresh keeps it. An empty result now shows "No battles
+match this filter." inside the table instead of silently hiding it.
 
-Not implemented yet.
+The list itself is still fetched on demand (loading it logs in with an idle account), so the
+filter is applied when "Load live battles" is pressed, not restored from cache.
 
 ### 0b. Codecs that under-read their payload
 

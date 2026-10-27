@@ -111,7 +111,10 @@
       <button onclick="loadBattles()" id="loadBattlesBtn">Load live battles</button>
       <span id="battleMsg" class="msg" style="margin-left:12px;"></span>
     </div>
-    <label class="check"><input type="checkbox" id="onlyAllowed"> Only battles my accounts can join</label>
+    <div class="actions" style="margin-top:8px;">
+      <input type="search" id="battleFilter" placeholder="Filter by name, id, mode or map" style="flex:1; min-width:220px;">
+      <label class="check" style="margin-left:12px;"><input type="checkbox" id="onlyAllowed"> Only battles my accounts can join</label>
+    </div>
     <div class="hint">Loading the list logs in with an idle account, so it cannot run while all enabled accounts are started. Clicking Use points the eligible accounts at that battle and saves it.</div>
     <div id="battleTableWrap" style="display:none; max-height:340px; overflow:auto;">
       <table id="battleTable">
@@ -289,14 +292,38 @@
     return (state.config?.accounts || []).filter((a) => a.enabled && canJoin(a, battle));
   }
 
+  /* Matches the typed query against the fields the battle list carries. Map is included
+     when the server sent one, so typing a map name works without promising a field the
+     list JSON does not always contain. */
+  function battleMatchesFilter(battle, query) {
+    if (!query) return true;
+    return [battle.name, battle.battleId, battle.battleMode, battle.mapName, battle.map]
+      .some((value) => String(value ?? "").toLowerCase().includes(query));
+  }
+
   function renderBattles() {
     const tbody = $("battles");
     const wrap = $("battleTableWrap");
     tbody.innerHTML = "";
     const onlyAllowed = $("onlyAllowed").checked;
+    const query = $("battleFilter").value.trim().toLowerCase();
 
-    const rows = state.battles.filter((b) => !onlyAllowed || joinableAccounts(b).length > 0);
-    wrap.style.display = rows.length ? "" : "none";
+    const rows = state.battles
+      .filter((b) => !onlyAllowed || joinableAccounts(b).length > 0)
+      .filter((b) => battleMatchesFilter(b, query));
+
+    /* An empty list because of the filter must look different from nothing loaded, so the
+       table stays visible with a message instead of silently disappearing. */
+    wrap.style.display = state.battles.length ? "" : "none";
+
+    if (!rows.length) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td colspan="6" style="opacity:.7">${
+        state.battles.length ? "No battles match this filter." : "No battles loaded."
+      }</td>`;
+      tbody.appendChild(tr);
+      return;
+    }
 
     rows.forEach((b) => {
       const players = (b.users || []).length;
@@ -485,6 +512,15 @@
   });
 
   $("onlyAllowed").addEventListener("change", renderBattles);
+
+  /* The filter survives a refresh: reloading the page must not wipe what the user was
+     looking for. Saved on every keystroke; the list is small, so no debounce is needed. */
+  const FILTER_KEY = "battleFilter";
+  $("battleFilter").value = localStorage.getItem(FILTER_KEY) || "";
+  $("battleFilter").addEventListener("input", () => {
+    localStorage.setItem(FILTER_KEY, $("battleFilter").value);
+    renderBattles();
+  });
 
   fetch("/api/config").then((r) => r.json()).then(renderConfig);
   fetch("/health")
